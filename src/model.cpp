@@ -17,7 +17,7 @@ extern "C" void initializeRandomStates(curandState *globalState, unsigned long l
 // Constructor
 Model::Model(int size_) : size(size_) {
     cudaFree(0);
-    cudaMalloc((void**)&positions, size * sizeof(double));
+    cudaMalloc((void**)&positions, 2 * size * sizeof(double));
 
     cudaMalloc((void**)&globalState, sizeof(curandState) * size);
     setModelEnum(simControl.modelType);
@@ -38,7 +38,7 @@ void Model::initializeRandomSeed(const unsigned long long seed_) {
 }
 
 void Model::setPositions(const vector<double>& positionsData) {
-    cudaMemcpy(positions, positionsData.data(), size * size * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(positions, positionsData.data(), 2 * size * sizeof(double), cudaMemcpyHostToDevice);
 }
 
 // Function to return the result matrix
@@ -51,8 +51,8 @@ unsigned long long Model::getRandomSeed() {
 }
 
 vector<double> Model::getPositions() const {
-    vector<double> positions_(size * size);
-    cudaMemcpy(positions_.data(), positions, size * size * sizeof(double), cudaMemcpyDeviceToHost);
+    vector<double> positions_(2 * size);
+    cudaMemcpy(positions_.data(), positions, 2 * size * sizeof(double), cudaMemcpyDeviceToHost);
     return positions_;
 }
 
