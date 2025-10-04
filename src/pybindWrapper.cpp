@@ -21,8 +21,22 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setNumVertices", &Model::setNumVertices)
         .def("setPositions", &Model::setPositions)
         .def("setModelEnum", &Model::setModelEnum)
+        .def("setStartIndices", &Model::setStartIndices)
+        .def("setMaxEdgeLength", &Model::setMaxEdgeLength)
+
+        .def("updateAreas", &Model::updateAreas)
+        .def("initializeNeighborCells", &Model::initializeNeighborCells)
+        .def("updateNeighborCells", &Model::updateNeighborCells)
 
         // Getters
         .def("getNumVertices", &Model::getNumVertices)
-        .def("getPositions", &Model::getPositions);
+        .def("getPositions", &Model::getPositions)
+        .def("getStartIndices", &Model::getStartIndices)
+        .def("getAreas", &Model::getAreas)
+        .def("getNeighborCells", &Model::getNeighborCells)
+        .def("getNeighborIndices", &Model::getNeighborIndices)
+    // Bind both overloads of updateNeighbors: no-arg and one taking a double.
+    .def("updateNeighbors", static_cast<void (Model::*)()>(&Model::updateNeighbors))
+    .def("updateNeighbors", static_cast<void (Model::*)(double)>(&Model::updateNeighbors))
+        .def("getBoxCounts", &Model::getBoxCounts);
     }
