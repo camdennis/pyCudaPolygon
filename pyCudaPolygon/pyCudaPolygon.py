@@ -1,10 +1,7 @@
 #from .pyCudaPolygonLink import libpyCudaPolygon as lpcp
 #from . import enums
-import libpyCudaPolygon as lpcp
+from pyCudaPolygonLink import libpyCudaPolygon as lpcp
 import enums
-#import libpyCudaElasto as lpcp
-#import calcKernel
-#import enums
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -33,6 +30,9 @@ class model(lpcp.Model):
             lpcp.Model.setModelEnum(self, enums.modelEnum.normal)
         else:
             raise Exception("That Model type does not exist")
+            
+    def getModelEnum(self):
+        return lpcp.Model.getModelEnum(self)
 
     def getRandomSeed(self):
         return lpcp.Model.getRandomSeed(self)
@@ -55,8 +55,22 @@ class model(lpcp.Model):
     def getPositions(self):
         return np.array(lpcp.Model.getPositions(self))
 
-    def updateNeighbors(self):
-        lpcp.Model.updateNeighbors(self)
+    def getNumNeighbors(self):
+        return np.array(lpcp.Model.getNumNeighbors(self))
+
+    def getNeighbors(self):
+        v = self.getNumVertices()
+        neighbors = np.array(lpcp.Model.getNeighbors(self))
+        maxNeighbors = len(neighbors) // v
+        neighbors = neighbors.reshape(v, maxNeighbors)
+        neigh = []
+        numNeighbors = self.getNumNeighbors()
+        for i, neighbor in enumerate(neighbors):
+            neigh = neigh.append(neighbor[:numNeighbors[i]])
+        return neigh
+
+    def updateNeighbors(self, a):
+        lpcp.Model.updateNeighbors(self, a)
 
     def setnArray(self, nArray):
         # we don't actually set the nArray, we set the startIndices:
@@ -115,7 +129,6 @@ class model(lpcp.Model):
             a = areaArray[i]
             pos = self.generatePolygon(n)
             area = self.getAreaOfPos(pos)
-            print(area)
 #            multiplier = a / area
 #            pos *= multiplier
             pos[::2] += np.random.rand()
@@ -183,23 +196,45 @@ class model(lpcp.Model):
             areaBit = dx * (dy1 + 2.0 * startY) / 2.0
             areas[idx] += areaBit
         return areas
-
-if __name__ == "__main__":
-    m = model(size = 10, seed = 1)
-    m.setModelEnum("abnormal")
-    n = int(sys.argv[1])
-    nArray = np.ones(2, dtype = int) * 5
-    areaArray = np.ones(2) * 0.05
-    m.generatePolygons(nArray, areaArray)
-    m.setPositions((m.getPositions() + 1) % 1)
-    m.updateAreas()
-    print(m.areaTesting())
-    print(m.getAreas())
-    m.setMaxEdgeLength(0.2)
-    m.initializeNeighborCells()
-    m.updateNeighborCells()
-    print(m.getNeighborCells())
-    print(m.getBoxCounts())
-    print(m.getNeighborIndices())
-    m.draw(nArray, 5)
-
+    
+    def saveModel(self, dirName, overwrite = False):
+        if not overwrite and os.path.isdir(dirName):
+            raise Exception("Packing exists. Not saving. To save over this file, set kwarg overwrite = True")
+        if not os.path.isdir(dirName):
+            os.mkdir(fileName)
+        # Get stuff to save:
+        modelEnum = self.getModelEnum()
+        numVertices = self.getNumVertices()
+        nArray = np.diff(self.getStartIndices())
+        positions = self.getPositions()
+        maxEdgeLength = self.getMaxEdgeLength()
+        kv = dict()
+        kv["modelEnum"] = str(modelEnum)
+        kv["numVertices"] = numVertices
+        kv["maxEdgeLength"] = maxEdgeLength
+        saveFile = dirName + "/scalars.dat"
+        with open(saveFile, 'w') as f:
+            for k in kv.keys():
+                f.write(k + ":\t" + str(kv[k]) + "\n")
+        f.close()
+        # We can save the nArray and positions back to back in one
+        # file since splitting it up is easy with the scalars.dat file
+        state = np.concatenate((nArray, positions))
+        np.save(dirName + "/state", state)
+        
+    def loadModel(self, dirName):
+        state = np.load(dirName + "/state.npy")
+        scalarsFile = dirName + "/scalars.dat"
+        with open(scalarsFile, 'r') as f:
+            lines = f.readlines()
+        f.close()
+        for line in lines:
+            k, v = line.split("\n")[0].split("\t")
+            if (k == "modelEnum"):
+                self.setModelEnum(v)
+            elif (k == "numVertices"):
+                self.setNumVertices(v)
+            elif (k == "maxEdgeLength"):
+                self.setMaxEdgeLength(v)
+        self.setnArray(state[:-self.getNumVertices() * 2].astype(int))
+        self.setPositions(state[-self.getNumVertices() * 2:])

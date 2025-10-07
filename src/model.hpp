@@ -28,12 +28,15 @@ public:
     void setMaxEdgeLength(double maxEdgeLength);
     vector<double> getAreas() const;
     void updateNeighborCells();
-    void updateNeighbors();
     void initializeNeighborCells();
     vector<int> getNeighborCells() const;
     vector<int> getBoxCounts() const;
     vector<int> getNeighborIndices() const;
     void updateNeighbors(double a);
+    vector<int> getNumNeighbors() const;
+    vector<int> getNeighbors() const;
+    double getMaxEdgeLength() const;
+    string getModelEnum() const;
 
 private:
     simControlStruct simControl;  // Instance of simControlStruct
@@ -54,6 +57,7 @@ private:
     int boxSize;
     int* numNeighbors;
     bool updateMaxNeighbors = false;
+    double maxEdgeLength;
 };
 
 #endif

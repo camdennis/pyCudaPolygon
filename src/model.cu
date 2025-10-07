@@ -297,23 +297,23 @@ __global__ void updateNeighborsKernel(const int* shapeId,
             }
         }
     }
-    }
+}
 
-    extern "C" void updateNeighborsCUDA(
-        int* shapeId,
-        int* startIndices, 
-        double* positions, 
-        int* cellLocation, 
-        int* neighborIndices,
-        int size,
-        int* neighbors,
-        int* numNeighbors,
-        int maxNeighbors,
-        int boxSize,
-        int* countPerBox,
-        double a
-        ) {
-        int numBlocks = (size + blockSize - 1) / blockSize;
-        updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
-    }
+extern "C" void updateNeighborsCUDA(
+    int* shapeId,
+    int* startIndices, 
+    double* positions, 
+    int* cellLocation, 
+    int* neighborIndices,
+    int size,
+    int* neighbors,
+    int* numNeighbors,
+    int maxNeighbors,
+    int boxSize,
+    int* countPerBox,
+    double a
+    ) {
+    int numBlocks = (size + blockSize - 1) / blockSize;
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
+}
 

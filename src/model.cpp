@@ -32,9 +32,9 @@ void Model::deallocateAll() {
 //    delete [] C;
 }
 
-void Model::setMaxEdgeLength(double maxEdgeLength) {
+void Model::setMaxEdgeLength(double maxEdgeLength_) {
+    maxEdgeLength = maxEdgeLength_;
     boxSize = ceil(1.0 / maxEdgeLength);
-    cout << boxSize << endl;
 }
 
 void Model::initializeNeighborCells() {
@@ -62,6 +62,14 @@ void Model::updateNeighbors(double a) {
 
 void Model::setModelEnum(simControlStruct::modelEnum modelType_) {
     simControl.modelType = modelType_;
+}
+
+string Model::getModelEnum() const {
+    // Return a human-friendly name if you have known enum values,
+    // otherwise fall back to the numeric value.
+    // If you want specific names, replace the numeric fallback with a switch
+    // mapping simControl.modelType to "normal"/"abnormal", etc.
+    return std::to_string(static_cast<int>(simControl.modelType));
 }
 
 void Model::initializeRandomSeed(const unsigned long long seed_) {
@@ -93,6 +101,22 @@ vector<double> Model::getPositions() const {
     vector<double> positions_(2 * size);
     cudaMemcpy(positions_.data(), positions, 2 * size * sizeof(double), cudaMemcpyDeviceToHost);
     return positions_;
+}
+
+double Model::getMaxEdgeLength() const {
+    return maxEdgeLength;
+}
+
+vector<int> Model::getNeighbors() const {
+    vector<int> neighbors_(maxNeighbors * size);
+    cudaMemcpy(neighbors_.data(), neighbors, maxNeighbors * size * sizeof(int), cudaMemcpyDeviceToHost);
+    return neighbors_;
+}
+
+vector<int> Model::getNumNeighbors() const {
+    vector<int> numNeighbors_(size);
+    cudaMemcpy(numNeighbors_.data(), numNeighbors, size * sizeof(int), cudaMemcpyDeviceToHost);
+    return numNeighbors_;
 }
 
 vector<int> Model::getStartIndices() const {
