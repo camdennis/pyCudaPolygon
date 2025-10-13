@@ -41,5 +41,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
-        .def("getBoxCounts", &Model::getBoxCounts);
+        .def("getBoxCounts", &Model::getBoxCounts)
+        // Calc Force Energy
+        .def("getForces", &Model::getForces);
     }

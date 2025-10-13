@@ -16,15 +16,25 @@ extern "C" void initializeRandomStates(curandState *globalState, unsigned long l
 extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numShapes);
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numShapes, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
 extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numShapes);
-extern "C" void updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a);
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors);
 
 // Constructor
 Model::Model(int size_) : size(size_) {
     cudaFree(0);
     cudaMalloc((void**)&positions, 2 * size * sizeof(double));
+    cudaMalloc((void**)&forces, size * 2 * sizeof(double));
+
+    cudaMalloc(&maxActualNeighbors, sizeof(int));
+    int init = INT_MIN;
+    cudaMemcpy(maxActualNeighbors, &init, sizeof(int), cudaMemcpyHostToDevice);
 
     cudaMalloc((void**)&globalState, sizeof(curandState) * size);
     setModelEnum(simControl.modelType);
+}
+
+void Model::resetMaxActualNeighbors() {
+    int init = INT_MIN;
+    cudaMemcpy(maxActualNeighbors, &init, sizeof(int), cudaMemcpyHostToDevice);
 }
 
 void Model::deallocateAll() {
@@ -57,7 +67,33 @@ void Model::updateNeighborCells() {
 }
 
 void Model::updateNeighbors(double a) {
-    updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
+    // first attempt
+    int newActualNeighbors = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
+                              neighborIndices, size, neighbors, numNeighbors,
+                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
+    if (newActualNeighbors > maxNeighbors) {
+        // read required max from device
+        // warn the user
+        std::cerr << "Warning: neighbor buffer overflow: maxNeighbors=" << maxNeighbors
+                  << " required=" << newActualNeighbors << ". Resizing and retrying.\n";
+
+        // resize neighbors buffer to accommodate required value (at least hostMaxActual)
+        int newMax = max(maxNeighbors * 2 + 1, newActualNeighbors);
+        cudaFree(neighbors);
+        cudaMalloc((void**)&neighbors, newMax * size * sizeof(int));
+        maxNeighbors = newMax;
+
+        // retry once
+        int ok = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
+                                      neighborIndices, size, neighbors, numNeighbors,
+                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
+        if (ok > maxNeighbors) {
+            std::cerr << "Warning: updateNeighbors still failed after resizing to " << maxNeighbors << "\n";
+        }
+    }
+
+    // reset device-side max tracker for next run
+//    resetMaxActualNeighbors();
 }
 
 void Model::setModelEnum(simControlStruct::modelEnum modelType_) {
@@ -157,3 +193,8 @@ vector<int> Model::getBoxCounts() const {
     return countPerBox_;
 }
 
+vector<double> Model::getForces() const {
+    vector<double> forces_(size * 2);
+    cudaMemcpy(forces_.data(), forces, size * 2 * sizeof(double), cudaMemcpyDeviceToHost);
+    return forces_;
+}

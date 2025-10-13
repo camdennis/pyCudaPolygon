@@ -37,6 +37,8 @@ public:
     vector<int> getNeighbors() const;
     double getMaxEdgeLength() const;
     string getModelEnum() const;
+    vector<double> getForces() const;
+    void resetMaxActualNeighbors();
 
 private:
     simControlStruct simControl;  // Instance of simControlStruct
@@ -58,6 +60,8 @@ private:
     int* numNeighbors;
     bool updateMaxNeighbors = false;
     double maxEdgeLength;
+    double* forces;
+    int* maxActualNeighbors;
 };
 
 #endif

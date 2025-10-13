@@ -63,10 +63,13 @@ class model(lpcp.Model):
         neighbors = np.array(lpcp.Model.getNeighbors(self))
         maxNeighbors = len(neighbors) // v
         neighbors = neighbors.reshape(v, maxNeighbors)
-        neigh = []
+        neigh = dict()
         numNeighbors = self.getNumNeighbors()
         for i, neighbor in enumerate(neighbors):
-            neigh = neigh.append(neighbor[:numNeighbors[i]])
+            allNeighbors = neighbor[:numNeighbors[i]]
+            if (len(allNeighbors) == 0):
+                continue
+            neigh[i] = allNeighbors
         return neigh
 
     def updateNeighbors(self, a):
@@ -139,7 +142,7 @@ class model(lpcp.Model):
         polygonPos = np.concatenate(polygonPos)
         self.setPositions(polygonPos)
 
-    def draw(self, nList, gridSize):
+    def draw(self, numbering = True):
 
         def fixPXPY(px, py):
             minX = min(px)
@@ -156,27 +159,37 @@ class model(lpcp.Model):
 
         pos = self.getPositions()
         start = 0
-        for n in nList:
+        fig, ax = plt.subplots()
+
+        for n in self.getnArray():
             px = pos[start:start + 2 * n][::2]
             py = pos[start:start + 2 * n][1::2]
             px = np.concatenate((px, [px[0]]))
             py = np.concatenate((py, [py[0]]))
             px, py = fixPXPY(px, py)
+
             for i in range(3):
                 for j in range(3):
-                    plt.plot(px + i - 1, py + j - 1)
+                    ax.plot(px + i - 1, py + j - 1, '-o', markersize=3)
+
+            # Label each vertex (except the repeated closing point)
+            for k in range(len(px) - 1):
+                ax.text(px[k], py[k], str(start//2 + k),
+                        fontsize=8, color='k', ha='left', va='bottom')
+
             start += 2 * n
-        for i in range(gridSize):
-            plt.plot([0, 1], [i / gridSize, i / gridSize], color = 'b')
-            plt.plot([i / gridSize, i / gridSize], [0, 1], color = 'b')
-        plt.gca().set_xlim([0, 1])
-        plt.gca().set_ylim([0, 1])
-        plt.gca().set_aspect(1)
-        plt.show()
+
+        ax.set_xlim([0, 1])
+        ax.set_ylim([0, 1])
+        ax.set_aspect(1)
+#        plt.show()
 
     def getStartIndices(self):
         return lpcp.Model.getStartIndices(self)
 
+    def getnArray(self):
+        return np.diff(self.getStartIndices())
+    
     def areaTesting(self):
         positions = self.getPositions()
         startIndices = self.getStartIndices()
@@ -238,3 +251,7 @@ class model(lpcp.Model):
                 self.setMaxEdgeLength(v)
         self.setnArray(state[:-self.getNumVertices() * 2].astype(int))
         self.setPositions(state[-self.getNumVertices() * 2:])
+
+
+    def getForces(self):
+        return np.array(lpcp.Model.getForces(self))

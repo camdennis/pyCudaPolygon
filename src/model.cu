@@ -181,125 +181,146 @@ extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int
     updateShapeIdKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, numShapes);
 }
 
-__global__ void updateNeighborsKernel(const int* shapeId, 
-    const int* startIndices, 
-    const double* positions, 
-    const int* cellLocation, 
-    const int* neighborIndices, 
+__global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
+    const int* __restrict__ startIndices,
+    const double* __restrict__ positions,
+    const int* __restrict__ cellLocation,
+    const int* __restrict__ neighborIndices,
     const int size,
-    int* neighbors,
-    int* numNeighbors,
+    int* __restrict__ neighbors,
+    int* __restrict__ numNeighbors,
     int maxNeighbors,
     int boxSize,
-    int* countPerBox,
+    int* __restrict__ countPerBox,
     double a
     ) {
+    const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
-    if (id1 < size) {
-        double t, u, denom;
-        // get the edges
-        int shape = shapeId[id1];
-        int st = startIndices[shape + 1] - 1;
-        int beginning = startIndices[shape];
-        int id2 = id1 + 1;
-        if (id1 == st) {
-            id2 = startIndices[shape];
-        }
-        double px = positions[2 * id1];
-        double py = positions[2 * id1 + 1];
-        double rx = positions[2 * id2] - px + 1.5;
-        double ry = positions[2 * id2 + 1] - py + 1.5;
-        while (rx > 1.0) {
-            rx -= 1.0;
-        }
-        while (ry > 1.0) {
-            ry -= 1.0;
-        }
-        rx -= 0.5;
-        ry -= 0.5;
-        // What box are you in?
-        int box = cellLocation[id1];
-        int x, y, newBox;
-        // What are the adjacent boxes?
-        int neighborCount = 0;
-        for (int dx = -1; dx < 2; dx++) {
-            for (int dy = -1; dy < 2; dy++) {
-                y = box / boxSize;
-                x = box % boxSize;
-                x += boxSize + dx;
-                x %= boxSize;
-                y += boxSize + dy;
-                y %= boxSize;
-                newBox = y * boxSize + x;
-                // okay, so you got the right box:
-                // Now loop through the edges. But first, what edges?
-                int si = countPerBox[newBox];
-                int sf = countPerBox[newBox + 1];
-                int siHigh = sf - 1;
-                // Make si be the index value that is less than the middle
-                int mid;
-                while (si != siHigh) {
-                    mid = si + (sf - si + 1) / 2;
-                    if (neighborIndices[mid] < id1) {
-                        si = mid + 1;
-                    }
-                    else {
-                        siHigh = mid;
-                    }
+    if (id1 >= size) return;
+
+    // cached per-thread values
+    int boxCount = boxSize * boxSize;
+
+    int shape = shapeId[id1];
+    int st = startIndices[shape + 1] - 1;
+    int id2 = (id1 == st) ? startIndices[shape] : id1 + 1;
+
+    const double px = positions[2 * id1];
+    const double py = positions[2 * id1 + 1];
+
+    double rx = positions[2 * id2] - px + 1.5;
+    double ry = positions[2 * id2 + 1] - py + 1.5;
+    // wrap once
+    while (rx > 1.0) rx -= 1.0;
+    while (ry > 1.0) ry -= 1.0;
+    rx -= 0.5;
+    ry -= 0.5;
+
+    int box = cellLocation[id1];
+    int bx = box % boxSize;
+    int by = box / boxSize;
+
+    int neighborCount = 0;
+
+    // iterate 3x3 neighborhood of boxes (with wrap)
+    for (int dx = -1; dx <= 1; dx++) {
+        int nx = bx + dx;
+        if (nx < 0) nx += boxSize; else if (nx >= boxSize) nx -= boxSize;
+        for (int dy = -1; dy <= 1; dy++) {
+            int ny = by + dy;
+            if (ny < 0) ny += boxSize; else if (ny >= boxSize) ny -= boxSize;
+
+            int newBox = ny * boxSize + nx;
+
+            int si = countPerBox[newBox];
+            int sf = (newBox + 1 < boxCount) ? countPerBox[newBox + 1] : size;
+//            if (si >= sf) continue;
+
+            // iterate entries in the neighborIndices array for this box
+            for (int idx = si; idx < sf; idx++) {
+                int nid = neighborIndices[idx];  // actual vertex index
+                if (nid <= id1) {
+                    continue;
                 }
-                for (int nid = si; nid < sf; nid++) {
-                    // Make sure this neighbor isn't an adjacent edge:
-                    if ((id1 == beginning && nid == beginning + boxSize - 1) || nid == id1 + 1) {
-                        continue;
+
+                int shape2 = shapeId[nid];
+                int st2 = startIndices[shape2 + 1] - 1;
+                int nid2 = (nid == st2) ? startIndices[shape2] : nid + 1;
+
+                // skip trivial/adjacent edges
+                if (nid == id1 || nid == id2 || nid2 == id1) continue;
+
+                // positions of neighbor edge
+                double qx = positions[2 * nid];
+                double qy = positions[2 * nid + 1];
+
+                double sx = positions[2 * nid2] - qx + 1.5;
+                double sy = positions[2 * nid2 + 1] - qy + 1.5;
+                double gx = qx - px + 1.5;
+                double gy = qy - py + 1.5;
+
+                // wrap once for these differences
+                while (sx > 1.0) sx -= 1.0;
+                while (sy > 1.0) sy -= 1.0;
+                while (gx > 1.0) gx -= 1.0;
+                while (gy > 1.0) gy -= 1.0;
+
+                sx -= 0.5;
+                sy -= 0.5;
+                gx -= 0.5;
+                gy -= 0.5;
+
+                double rSize = sqrt(rx * rx + ry * ry);
+                double sSize = sqrt(sx * sx + sy * sy);
+
+                double denom = rx * sy - ry * sx;
+                if (fabs(denom) < eps) continue; // parallel or degenerate
+
+                double t = (gx * sy - gy * sx) / denom;
+                double u = (gx * ry - gy * rx) / denom;
+
+                if (t >= -a / rSize && t <= 1.0 + a / rSize && u >= -a / sSize && u <= 1.0 + a / sSize) {
+                    if (neighborCount < maxNeighbors) {
+                        neighbors[id1 * maxNeighbors + neighborCount] = nid;
                     }
-                    // Get nid2:
-                    int shape2 = shapeId[nid];
-                    int st2 = startIndices[shape2 + 1] - 1;
-                    int nid2 = nid + 1;
-                    if (nid == st2) {
-                        nid2 = startIndices[shape2];
-                    }
-                    // Now we check if they are in contact:
-                    double qx = positions[2 * nid];
-                    double qy = positions[2 * nid + 1];
-                    double sx = qx - positions[2 * nid2] + 1.5;
-                    double sy = qy - positions[2 * nid2 + 1] + 1.5;
-                    double pqx = qx - px + 1.5;
-                    double pqy = qy - py + 1.5;
-                    while (sx > 1.0) {
-                        sx -= 1.0;
-                    }
-                    while (sy > 1.0) {
-                        sy -= 1.0;
-                    }
-                    while (pqx > 1.0) {
-                        pqx -= 1.0;
-                    }
-                    while (pqy > 1.0) {
-                        pqy -= 1.0;
-                    }
-                    sx -= 0.5;
-                    sy -= 0.5;
-                    pqx -= 0.5;
-                    pqy -= 0.5;
-                    denom = rx * sy - ry * sx;
-                    t = (pqx * sy - pqy * sx) / denom;
-                    u = (pqx * ry - pqy * rx) / denom;
-                    if (t >= -a && t <= 1 + a && u >= -a && u <= 1 + a) {
-                        // It intersects so put it in
-                        if (neighborCount <= maxNeighbors) {
-                            neighbors[id1 * maxNeighbors + neighborCount] = nid;
-                        }
-                        neighborCount++;
-                    }
+                    neighborCount++;
                 }
-                numNeighbors[id1] = neighborCount;
             }
         }
     }
+    numNeighbors[id1] = neighborCount;
 }
 
-extern "C" void updateNeighborsCUDA(
+__global__ void maxReduceKernel(const int* __restrict__ data, int n, int* __restrict__ out) {
+    extern __shared__ int sdata[];              // size: blockDim.x * sizeof(int)
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    int localMax = INT_MIN;
+    for (int i = idx; i < n; i += stride) {
+        int v = data[i];
+        if (v > localMax) localMax = v;
+    }
+    sdata[tid] = localMax;
+    __syncthreads();
+
+    // in-block reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            int a = sdata[tid];
+            int b = sdata[tid + s];
+            sdata[tid] = (a > b) ? a : b;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicMax(out, sdata[0]);
+    }
+}
+
+extern "C" int updateNeighborsCUDA(
     int* shapeId,
     int* startIndices, 
     double* positions, 
@@ -311,9 +332,18 @@ extern "C" void updateNeighborsCUDA(
     int maxNeighbors,
     int boxSize,
     int* countPerBox,
-    double a
-    ) {
+    double a,
+    int* maxActualNeighbors
+) {
     int numBlocks = (size + blockSize - 1) / blockSize;
     updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
+    cudaDeviceSynchronize();
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    maxReduceKernel<<<blocks, threads, threads * sizeof(int)>>>(numNeighbors, size, maxActualNeighbors);
+    cudaDeviceSynchronize();
+    int newMaxActualNeighbors;
+    cudaMemcpy(&newMaxActualNeighbors, maxActualNeighbors, sizeof(int), cudaMemcpyDeviceToHost);
+    return newMaxActualNeighbors;
 }
 
