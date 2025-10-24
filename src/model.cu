@@ -24,9 +24,9 @@ __global__ void initStatesKernel(curandState *globalState, unsigned long long se
     }
 }
 
-__global__ void updateAreasKernel(double* areas, double* positions, int* startIndices, int numShapes) {
+__global__ void updateAreasKernel(double* areas, double* positions, int* startIndices, int numPolygons) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numShapes) {
+    if (idx < numPolygons) {
         int start = startIndices[idx];
         int end = startIndices[idx + 1];
         double startY = positions[2 * start + 1];
@@ -75,19 +75,41 @@ __global__ void updateAreasKernel(double* areas, double* positions, int* startIn
     }
 }
 
-__global__ void updateShapeIdKernel(int* shapeId, int* startIndices, int numShapes) {
+__global__ void updatePerimetersKernel(double* perimeters, double* positions, int* startIndices, int numPolygons) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numShapes) {
+    if (idx < numPolygons) {
+        int start = startIndices[idx];
+        int end = startIndices[idx + 1];
+        double dx, dy;
+        for (int i = start; i < end - 1; i++) {
+            dx = (positions[2 * i] - positions[2 * i + 2] + 0.5);
+            while (dx < 0.0) {
+                dx += 1;
+            }
+            while (dx > 1.0) {
+                dx -= 1.0;
+            }
+            dx -= 0.5;
+            dy = (positions[2 * i + 1] - positions[2 * i + 3] + 0.5);
+            while (dy < 0.0) dy += 1.0;
+            while (dy > 1.0) dy -= 1.0;
+            perimeters[idx] += sqrt(dx * dx + dy * dy);
+        }
+    }
+}
+
+__global__ void updateShapeIdKernel(int* shapeId, int* startIndices, int numPolygons) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numPolygons) {
         for (int i = startIndices[idx]; i < startIndices[idx + 1]; i++) {
             shapeId[i] = idx;
         }
     }
 }
 
-__global__ void updateNeighborCellsKernel(double* positions, int* startIndices, int* shapeId, int numShapes, int size, int boxSize, int* cellLocation) {
+__global__ void updateNeighborCellsKernel(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        int shape = shapeId[idx];
         int v2 = idx + 1;
         if (idx == size - 1 || shapeId[idx] != shapeId[idx + 1]) {
             v2 = startIndices[shapeId[idx]];
@@ -136,14 +158,19 @@ extern "C" void initializeRandomStates(curandState *globalState, unsigned long l
     cudaDeviceSynchronize();
 }
 
-extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numShapes) {
-    int numBlocks = (numShapes + blockSize - 1) / blockSize;
-    updateAreasKernel<<<numBlocks, blockSize>>>(areas, positions, startIndices, numShapes);
+extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numPolygons) {
+    int numBlocks = (numPolygons + blockSize - 1) / blockSize;
+    updateAreasKernel<<<numBlocks, blockSize>>>(areas, positions, startIndices, numPolygons);
 }
 
-extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numShapes, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices) {
+extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons) {
+    int numBlocks = (numPolygons + blockSize - 1) / blockSize;
+    updatePerimetersKernel<<<numBlocks, blockSize>>>(perimeters, positions, startIndices, numPolygons);
+}
+
+extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborCellsKernel<<<numBlocks, blockSize>>>(positions, startIndices, shapeId, numShapes, size, boxSize, cellLocation);
+    updateNeighborCellsKernel<<<numBlocks, blockSize>>>(positions, startIndices, shapeId, numPolygons, size, boxSize, cellLocation);
     thrust::device_vector<int> d_cellLocation(cellLocation, cellLocation + size);
     thrust::device_vector<int> d_neighborIndices(neighborIndices, neighborIndices + size);
     thrust::device_vector<int> d_countPerBox(countPerBox, countPerBox + boxSize * boxSize);
@@ -176,9 +203,9 @@ extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, in
     );
 }
 
-extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numShapes) {
+extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numPolygons) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateShapeIdKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, numShapes);
+    updateShapeIdKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, numPolygons);
 }
 
 __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
@@ -192,7 +219,8 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
     int maxNeighbors,
     int boxSize,
     int* __restrict__ countPerBox,
-    double a
+    double a,
+    bool* __restrict__ inside
     ) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -282,6 +310,12 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
                 if (t >= -a / rSize && t <= 1.0 + a / rSize && u >= -a / sSize && u <= 1.0 + a / sSize) {
                     if (neighborCount < maxNeighbors) {
                         neighbors[id1 * maxNeighbors + neighborCount] = nid;
+                        if (denom > 0) {
+                            inside[id1 * maxNeighbors + neighborCount] = true;
+                        }
+                        else {
+                            inside[id1 * maxNeighbors + neighborCount] = false;
+                        }
                     }
                     neighborCount++;
                 }
@@ -333,10 +367,11 @@ extern "C" int updateNeighborsCUDA(
     int boxSize,
     int* countPerBox,
     double a,
-    int* maxActualNeighbors
+    int* maxActualNeighbors,
+    bool* inside
 ) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a, inside);
     cudaDeviceSynchronize();
     int threads = 256;
     int blocks = (size + threads - 1) / threads;

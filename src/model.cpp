@@ -13,10 +13,11 @@ using namespace std;
 
 // Declaration of pointwiseMultiply function (defined in model.cu)
 extern "C" void initializeRandomStates(curandState *globalState, unsigned long long seed, int gridSize);
-extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numShapes);
-extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numShapes, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
-extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numShapes);
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors);
+extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numPolygons);
+extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
+extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numPolygons);
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors, bool* inside);
+extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndics, int numPolygons);
 
 // Constructor
 Model::Model(int size_) : size(size_) {
@@ -55,22 +56,23 @@ void Model::initializeNeighborCells() {
     cudaMalloc((void**)&cellLocation, size * sizeof(int));
     cudaMalloc((void**)&neighborIndices, size * sizeof(int));
     cudaMalloc((void**)&neighbors, maxNeighbors * size * sizeof(int));
+    cudaMalloc((void**)&inside, maxNeighbors * size * sizeof(bool));
 
     cudaMalloc((void**)&shapeId, size * sizeof(int));
-    updateShapeIdCUDA(shapeId, startIndices, size, numShapes);
+    updateShapeIdCUDA(shapeId, startIndices, size, numPolygons);
 
     cudaMalloc((void**)&numNeighbors, size * sizeof(int));
 }
 
 void Model::updateNeighborCells() {
-    updateNeighborCellsCUDA(positions, startIndices, shapeId, numShapes, size, boxSize, cellLocation, countPerBox, boxId, boxesUsed, neighborIndices);
+    updateNeighborCellsCUDA(positions, startIndices, shapeId, numPolygons, size, boxSize, cellLocation, countPerBox, boxId, boxesUsed, neighborIndices);
 }
 
 void Model::updateNeighbors(double a) {
     // first attempt
     int newActualNeighbors = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                               neighborIndices, size, neighbors, numNeighbors,
-                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
+                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside);
     if (newActualNeighbors > maxNeighbors) {
         // read required max from device
         // warn the user
@@ -80,13 +82,15 @@ void Model::updateNeighbors(double a) {
         // resize neighbors buffer to accommodate required value (at least hostMaxActual)
         int newMax = max(maxNeighbors * 2 + 1, newActualNeighbors);
         cudaFree(neighbors);
+        cudaFree(inside);
         cudaMalloc((void**)&neighbors, newMax * size * sizeof(int));
+        cudaMalloc((void**)&inside, newMax * size * sizeof(bool));
         maxNeighbors = newMax;
 
         // retry once
         int ok = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                                       neighborIndices, size, neighbors, numNeighbors,
-                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
+                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside);
         if (ok > maxNeighbors) {
             std::cerr << "Warning: updateNeighbors still failed after resizing to " << maxNeighbors << "\n";
         }
@@ -118,15 +122,21 @@ void Model::setPositions(const vector<double>& positionsData) {
 }
 
 void Model::setStartIndices(const vector<int>& startIndicesData) {
-    numShapes = startIndicesData.size() - 1;
-    cudaMalloc((void**)&areas, numShapes * sizeof(double));
-    cudaMalloc((void**)&startIndices, (numShapes + 1) * sizeof(double));
-    cudaMemcpy(startIndices, startIndicesData.data(), (numShapes + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    numPolygons = startIndicesData.size() - 1;
+    cudaMalloc((void**)&areas, numPolygons * sizeof(double));
+    cudaMalloc((void**)&perimeters, numPolygons * sizeof(double));
+    cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(double));
+    cudaMemcpy(startIndices, startIndicesData.data(), (numPolygons + 1) * sizeof(int), cudaMemcpyHostToDevice);
 }
 
 // Function to return the result matrix
 int Model::getNumVertices() const {
     return size;
+}
+
+// Function to return the result matrix
+int Model::getNumPolygons() const {
+    return numPolygons;
 }
 
 unsigned long long Model::getRandomSeed() {
@@ -149,6 +159,21 @@ vector<int> Model::getNeighbors() const {
     return neighbors_;
 }
 
+vector<bool> Model::getInsideFlag() const {
+    size_t n = static_cast<size_t>(maxNeighbors) * static_cast<size_t>(size);
+    if (n == 0) return vector<bool>();
+
+    // temporary contiguous buffer that matches device layout (bytes)
+    vector<unsigned char> tmp(n);
+    // copy from device (device buffer 'inside' was allocated with sizeof(bool))
+    cudaMemcpy(tmp.data(), inside, n * sizeof(bool), cudaMemcpyDeviceToHost);
+
+    // convert to vector<bool>
+    vector<bool> inside_(n);
+    for (size_t i = 0; i < n; ++i) inside_[i] = tmp[i] ? true : false;
+    return inside_;
+}
+
 vector<int> Model::getNumNeighbors() const {
     vector<int> numNeighbors_(size);
     cudaMemcpy(numNeighbors_.data(), numNeighbors, size * sizeof(int), cudaMemcpyDeviceToHost);
@@ -156,19 +181,31 @@ vector<int> Model::getNumNeighbors() const {
 }
 
 vector<int> Model::getStartIndices() const {
-    vector<int> startIndices_(numShapes + 1);
-    cudaMemcpy(startIndices_.data(), startIndices, (numShapes + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+    vector<int> startIndices_(numPolygons + 1);
+    cudaMemcpy(startIndices_.data(), startIndices, (numPolygons + 1) * sizeof(int), cudaMemcpyDeviceToHost);
     return startIndices_;
 }
 
 void Model::updateAreas() {
-    updateAreasCUDA(areas, positions, startIndices, numShapes);
+    cudaMemset(areas, 0, numPolygons * sizeof(double));
+    updateAreasCUDA(areas, positions, startIndices, numPolygons);
+}
+
+void Model::updatePerimeters() {
+    cudaMemset(perimeters, 0, numPolygons * sizeof(double));
+    updatePerimetersCUDA(perimeters, positions, startIndices, numPolygons);
 }
 
 vector<double> Model::getAreas() const {
-    vector<double> areas_(numShapes);
-    cudaMemcpy(areas_.data(), areas, numShapes * sizeof(double), cudaMemcpyDeviceToHost);
+    vector<double> areas_(numPolygons);
+    cudaMemcpy(areas_.data(), areas, numPolygons * sizeof(double), cudaMemcpyDeviceToHost);
     return areas_;
+}
+
+vector<double> Model::getPerimeters() const {
+    vector<double> perimeters_(numPolygons);
+    cudaMemcpy(perimeters_.data(), perimeters, numPolygons * sizeof(double), cudaMemcpyDeviceToHost);
+    return perimeters_;
 }
 
 void Model::setNumVertices(int numVertices_) {

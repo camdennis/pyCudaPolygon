@@ -44,6 +44,9 @@ class model(lpcp.Model):
     def getNumVertices(self):
         return lpcp.Model.getNumVertices(self)
 
+    def getNumPolygons(self):
+        return lpcp.Model.getNumPolygons(self)
+
     def initializeRandomSeed(self, seed = None):
         if seed is None:
             seed = np.random.randint(2**31)
@@ -72,10 +75,25 @@ class model(lpcp.Model):
             neigh[i] = allNeighbors
         return neigh
 
+    def getInsideFlag(self):
+        v = self.getNumVertices()
+        inside = np.array(lpcp.Model.getInsideFlag(self))
+        maxNeighbors = len(inside) // v
+        inside = inside.reshape(v, maxNeighbors)
+        insideDict = dict()
+        numNeighbors = self.getNumNeighbors()
+        for i, el in enumerate(inside):
+            allEl = el[:numNeighbors[i]]
+            if (len(allEl) == 0):
+                continue
+            insideDict[i] = allEl
+        return insideDict
+
     def updateNeighbors(self, a):
         lpcp.Model.updateNeighbors(self, a)
 
     def setnArray(self, nArray):
+        nArray = nArray.astype(int)
         # we don't actually set the nArray, we set the startIndices:
         startIndices = np.concatenate(([0], np.cumsum(nArray)))
         lpcp.Model.setStartIndices(self, startIndices)
@@ -86,8 +104,8 @@ class model(lpcp.Model):
     def updateAreas(self):
         lpcp.Model.updateAreas(self)
 
-    def getArea(self):
-        return np.array(lpcp.Model.getArea(self))
+    def getAreas(self):
+        return np.array(lpcp.Model.getAreas(self))
 
     def getAreaOfPos(self, pos):
         x = pos[::2]
@@ -116,12 +134,42 @@ class model(lpcp.Model):
         return np.array(lpcp.Model.getNeighborIndices(self))
 
     def generatePolygon(self, n):
-        angles = 2 * np.pi * np.sort(np.random.rand(n))
-        radius = np.random.rand(n) * 0.2
-        pos = np.vstack((radius * np.cos(angles), radius * np.sin(angles))).T.reshape(n * 2)
-        return pos
+        def convex_hull(points):
+            pts = points[np.lexsort((points[:,1], points[:,0]))]
+            def half(pts):
+                h = []
+                for p in pts:
+                    while len(h) >= 2:
+                        r, q = h[-2], h[-1]
+                        if (q[0]-r[0])*(p[1]-r[1]) - (q[1]-r[1])*(p[0]-r[0]) <= 0:
+                            h.pop()
+                        else:
+                            break
+                    h.append(tuple(p))
+                return h
+            lower = half(pts)
+            upper = half(pts[::-1])
+            hull = np.array(lower[:-1] + upper[:-1])
+            return hull
+        pts = np.random.rand(max(8, n*3), 2) - 0.5           # oversample
+        hull = convex_hull(pts)
+        if len(hull) < n:
+            # subdivide hull edges to reach n
+            extra = []
+            i = 0
+            while len(hull) + len(extra) < n:
+                a = hull[i % len(hull)]
+                b = hull[(i+1) % len(hull)]
+                t = np.random.rand()
+                extra.append(a*(1-t) + b*t)
+                i += 1
+            hull = np.vstack([hull, np.array(extra)])
+        hull = hull[:n]       # trim if needed
+        return hull.reshape(n*2)
 
+    '''
     def generatePolygons(self, nArray, areaArray):
+        nArray = nArray.astype(int)
         totalN = np.sum(nArray).astype(int)
         self.setNumVertices(totalN)
         self.size = totalN
@@ -130,18 +178,22 @@ class model(lpcp.Model):
         for i in range(len(nArray)):
             n = nArray[i]
             a = areaArray[i]
-            pos = self.generatePolygon(n)
-            area = self.getAreaOfPos(pos)
-#            multiplier = a / area
-#            pos *= multiplier
+            pos = self.generatePolygon(n) / 50
             pos[::2] += np.random.rand()
             pos[1::2] += np.random.rand()
-#            pos %= 1
             polygonPos.append(pos)
-            area = self.getAreaOfPos(pos)
         polygonPos = np.concatenate(polygonPos)
+        pos += 1
+        pos %= 1
         self.setPositions(polygonPos)
-
+        self.updateAreas()
+        areas = self.getAreas()
+        scaling = []
+        for i in range(len(nArray)):
+            scaling.append(np.sqrt(np.repeat(areaArray[i], nArray[i] * 2) / areas[i]))
+        scaling = np.concatenate(scaling)
+        self.setPositions(polygonPos * scaling)
+    '''
     def draw(self, numbering = True):
 
         def fixPXPY(px, py):
@@ -174,7 +226,9 @@ class model(lpcp.Model):
 
             # Label each vertex (except the repeated closing point)
             for k in range(len(px) - 1):
-                ax.text(px[k], py[k], str(start//2 + k),
+                textX = (px[k] + 1) % 1
+                textY = (py[k] + 1) % 1
+                ax.text(textX, textY, str(start//2 + k),
                         fontsize=8, color='k', ha='left', va='bottom')
 
             start += 2 * n
@@ -189,32 +243,12 @@ class model(lpcp.Model):
 
     def getnArray(self):
         return np.diff(self.getStartIndices())
-    
-    def areaTesting(self):
-        positions = self.getPositions()
-        startIndices = self.getStartIndices()
-        numShapes = len(startIndices) - 1
-        areas = np.zeros(numShapes)
-        for idx in range(numShapes):
-            start = startIndices[idx]
-            end = startIndices[idx + 1]
-            startY = positions[2 * start + 1]
-            for i in range(start, end - 1):
-                dx = (positions[2 * i] - positions[2 * i + 2] + 0.5) % 1 - 0.5
-                dy1 = (positions[2 * i + 1] - startY + 0.5) % 1
-                dy2 = (positions[2 * i + 3] - startY + 0.5) % 1
-                areas[idx] += dx * (dy1 + dy2 - 1.0 + 2.0 * startY) / 2.0
-            dx = (positions[2 * end - 2] - positions[2 * start] + 0.5) % 1 - 0.5
-            dy1 = (positions[2 * end - 1] - startY + 0.5) % 1 - 0.5
-            areaBit = dx * (dy1 + 2.0 * startY) / 2.0
-            areas[idx] += areaBit
-        return areas
-    
+        
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):
             raise Exception("Packing exists. Not saving. To save over this file, set kwarg overwrite = True")
         if not os.path.isdir(dirName):
-            os.mkdir(fileName)
+            os.mkdir(dirName)
         # Get stuff to save:
         modelEnum = self.getModelEnum()
         numVertices = self.getNumVertices()
@@ -255,3 +289,106 @@ class model(lpcp.Model):
 
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
+
+    def setRandomPolygons(self):
+        # Generates random polygons with size similar to box size (so they're huge)
+        pos = []
+        for n in self.getnArray():
+            pg = self.generatePolygon(n) / 2
+            # Make the polygons smaller so they don't have image problems
+            # perturb the polygons so they're centered randomly
+            pg[::2] += np.random.rand()
+            pg[1::2] += np.random.rand()
+            pg += 1
+            pg %= 1
+            pos.append(pg)
+        pos = np.concatenate(pos)
+        # Now they all lie in a much smaller box
+        self.setPositions(pos)
+
+    def setECPolygons(self, n):
+        # EC stands for equally coordinated
+        # Here n is the number of nodes per particle
+        N = self.getNumVertices()
+        if (N % n != 0):
+            raise Exception("Total vertices and number of vertices per polygon are incompatible")
+        self.setnArray(np.ones(N // n) * n)
+
+    def getCentersOfMass(self):
+        positions = self.getPositions()
+        nArray = self.getnArray()
+        # Loop over n
+        startIndices = np.concatenate((np.array([0]), np.cumsum(nArray)))
+        csom = []
+        for n, s in zip(nArray, startIndices):
+            polygonPos = positions[2 * s : 2 * s + 2 * n].reshape(n, 2) + 0
+            polygonPos -= positions[2 * s: 2 * s + 2]
+            polygonPos += 1.5
+            polygonPos %= 1.0
+            polygonPos -= 0.5
+            csom.append(np.mean(polygonPos, axis = 0) + positions[2 * s : 2 * s + 2])
+        return np.concatenate(csom)
+
+    def setAreas(self, targetAreas):
+        nArray = self.getnArray()
+        self.updateAreas()
+        areas = self.getAreas()
+        positions = self.getPositions().copy().reshape(self.getNumVertices(), 2)
+
+        start = 0
+        for i, n in enumerate(nArray):
+            s = start
+            poly = positions[s:s + n].copy()   # shape (n,2)
+
+            # Unwrap polygon relative to the first vertex to avoid periodic jumps
+            ref = poly[0].copy()
+            for j in range(1, n):
+                d = poly[j] - ref
+                # shift to nearest image (puts d in [-0.5,0.5] per coordinate)
+                d = d - np.round(d)
+                poly[j] = ref + d
+
+            # compute area on unwrapped coordinates (shoelace)
+            x = poly[:, 0]
+            y = poly[:, 1]
+            area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
+            if area <= 0:
+                start += n
+                continue
+
+            # scale about centroid (unwrapped)
+            scale = np.sqrt(targetAreas[i] / area)
+            centroid = poly.mean(axis=0)
+            poly = (poly - centroid) * scale + centroid
+
+            # re-wrap into [0,1)
+            poly = np.mod(poly, 1.0)
+
+            positions[s:s + n] = poly
+            start += n
+
+        # write back flattened positions and update areas
+        self.setPositions(positions.reshape(self.getNumVertices() * 2))
+        self.updateAreas()
+        areas = self.getAreas()
+#        if (np.sum(abs(areas - targetAreas)) >= 1e-9):
+#            raise Exception("One of the areas was not set correctly. This may be due to the area of the original shape being too small for the boundary conditions")
+        
+    def setMonoArea(self, phi = 1):
+        # This overrides phi!
+        targetArea = phi / self.getNumPolygons()
+        self.updateAreas()
+        areas = self.getAreas()
+        # Let's keep phi the same
+        n = self.getNumPolygons()
+        targetAreas = np.ones(n) * phi / n
+        if (np.max(targetAreas) > 1 / 9):
+            raise Exception("The phi you have chosen has caused the shapes to be too large and compromised the PBCs")
+        self.setAreas(targetAreas)
+
+    def setPhi(self, phi):
+        self.updateAreas()
+        areas = self.getAreas()
+        totalArea = np.sum(areas)
+        targetAreas = phi * areas / totalArea
+        self.setAreas(targetAreas)

@@ -25,11 +25,13 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setMaxEdgeLength", &Model::setMaxEdgeLength)
 
         .def("updateAreas", &Model::updateAreas)
+        .def("updatePerimeters", &Model::updatePerimeters)
         .def("initializeNeighborCells", &Model::initializeNeighborCells)
         .def("updateNeighborCells", &Model::updateNeighborCells)
 
         // Getters
         .def("getNumVertices", &Model::getNumVertices)
+        .def("getNumPolygons", &Model::getNumPolygons)
         .def("getPositions", &Model::getPositions)
         .def("getModelEnum", &Model::getModelEnum)
         .def("getStartIndices", &Model::getStartIndices)
@@ -42,6 +44,8 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
         .def("getBoxCounts", &Model::getBoxCounts)
+        .def("getInsideFlag", &Model::getInsideFlag)
+        .def("getPerimeters", &Model::getPerimeters)
         // Calc Force Energy
         .def("getForces", &Model::getForces);
     }

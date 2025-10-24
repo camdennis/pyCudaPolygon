@@ -17,6 +17,7 @@ public:
     void setNumVertices(int size);
     void setPositions(const vector<double>& positions_);
     int getNumVertices() const;
+    int getNumPolygons() const;
     vector<double> getPositions() const;
     void setStartIndices(const vector<int>& startIndices_);
     vector<int> getStartIndices() const;
@@ -39,10 +40,13 @@ public:
     string getModelEnum() const;
     vector<double> getForces() const;
     void resetMaxActualNeighbors();
+    vector<bool> getInsideFlag() const;
+    void updatePerimeters();
+    vector<double> getPerimeters() const;
 
 private:
     simControlStruct simControl;  // Instance of simControlStruct
-    int size, numShapes;
+    int size, numPolygons;
     unsigned long long seed;
     curandState* globalState;
     double* positions;
@@ -62,6 +66,8 @@ private:
     double maxEdgeLength;
     double* forces;
     int* maxActualNeighbors;
+    bool* inside;
+    double* perimeters;
 };
 
 #endif
