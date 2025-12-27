@@ -11,13 +11,25 @@
 
 using namespace std;
 
-// Declaration of pointwiseMultiply function (defined in model.cu)
+// Declaration of CUDA helper functions (defined in model.cu)
 extern "C" void initializeRandomStates(curandState *globalState, unsigned long long seed, int gridSize);
 extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numPolygons);
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
 extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numPolygons);
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors, bool* inside);
-extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndics, int numPolygons);
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors, bool* inside, double* t, double* u);
+extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons);
+extern "C" void updateOverlapAreaCUDA(
+    int* shapeId,
+    int* startIndices,
+    int pointDensity,
+    int* intersectionCounter,
+    int* neighborIndices,
+    int size,
+    int boxSize,
+    int* countPerBox,
+    double* positions,
+    double& overlapArea
+);
 
 // Constructor
 Model::Model(int size_) : size(size_) {
@@ -45,7 +57,7 @@ void Model::deallocateAll() {
 
 void Model::setMaxEdgeLength(double maxEdgeLength_) {
     maxEdgeLength = maxEdgeLength_;
-    boxSize = ceil(1.0 / maxEdgeLength);
+    boxSize = floor(1.0 / maxEdgeLength);
 }
 
 void Model::initializeNeighborCells() {
@@ -57,6 +69,9 @@ void Model::initializeNeighborCells() {
     cudaMalloc((void**)&neighborIndices, size * sizeof(int));
     cudaMalloc((void**)&neighbors, maxNeighbors * size * sizeof(int));
     cudaMalloc((void**)&inside, maxNeighbors * size * sizeof(bool));
+
+    cudaMalloc((void**)&t, maxNeighbors * size * sizeof(double));
+    cudaMalloc((void**)&u, maxNeighbors * size * sizeof(double));
 
     cudaMalloc((void**)&shapeId, size * sizeof(int));
     updateShapeIdCUDA(shapeId, startIndices, size, numPolygons);
@@ -72,7 +87,7 @@ void Model::updateNeighbors(double a) {
     // first attempt
     int newActualNeighbors = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                               neighborIndices, size, neighbors, numNeighbors,
-                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside);
+                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside, t, u);
     if (newActualNeighbors > maxNeighbors) {
         // read required max from device
         // warn the user
@@ -83,14 +98,18 @@ void Model::updateNeighbors(double a) {
         int newMax = max(maxNeighbors * 2 + 1, newActualNeighbors);
         cudaFree(neighbors);
         cudaFree(inside);
+        cudaFree(t);
+        cudaFree(u);
         cudaMalloc((void**)&neighbors, newMax * size * sizeof(int));
         cudaMalloc((void**)&inside, newMax * size * sizeof(bool));
+        cudaMalloc((void**)&t, newMax * size * sizeof(bool));
+        cudaMalloc((void**)&u, newMax * size * sizeof(bool));
         maxNeighbors = newMax;
 
         // retry once
         int ok = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                                       neighborIndices, size, neighbors, numNeighbors,
-                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside);
+                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside, t, u);
         if (ok > maxNeighbors) {
             std::cerr << "Warning: updateNeighbors still failed after resizing to " << maxNeighbors << "\n";
         }
@@ -125,7 +144,7 @@ void Model::setStartIndices(const vector<int>& startIndicesData) {
     numPolygons = startIndicesData.size() - 1;
     cudaMalloc((void**)&areas, numPolygons * sizeof(double));
     cudaMalloc((void**)&perimeters, numPolygons * sizeof(double));
-    cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(double));
+    cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(int));
     cudaMemcpy(startIndices, startIndicesData.data(), (numPolygons + 1) * sizeof(int), cudaMemcpyHostToDevice);
 }
 
@@ -143,10 +162,22 @@ unsigned long long Model::getRandomSeed() {
     return seed;
 }
 
+vector<int> Model::getShapeId() const {
+    vector<int> shapeId_(size);
+    cudaMemcpy(shapeId_.data(), shapeId, size * sizeof(int), cudaMemcpyDeviceToHost);
+    return shapeId_;
+}
+
 vector<double> Model::getPositions() const {
     vector<double> positions_(2 * size);
     cudaMemcpy(positions_.data(), positions, 2 * size * sizeof(double), cudaMemcpyDeviceToHost);
     return positions_;
+}
+
+vector<int> Model::getIntersectionsCounter() const {
+    vector<int> intersectionsCounter_(pointDensity * pointDensity);
+    cudaMemcpy(intersectionsCounter_.data(), intersectionsCounter, pointDensity * pointDensity * sizeof(int), cudaMemcpyDeviceToHost);
+    return intersectionsCounter_;
 }
 
 double Model::getMaxEdgeLength() const {
@@ -172,6 +203,16 @@ vector<bool> Model::getInsideFlag() const {
     vector<bool> inside_(n);
     for (size_t i = 0; i < n; ++i) inside_[i] = tmp[i] ? true : false;
     return inside_;
+}
+
+vector<double> Model::getTU() const {
+    size_t n = static_cast<size_t>(maxNeighbors) * static_cast<size_t>(size);
+    if (n == 0) return vector<double>();
+    // temporary contiguous buffer that matches device layout (bytes)
+    vector<double> tu_(2 * n);
+    cudaMemcpy(tu_.data(), t, n * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(tu_.data() + n, u, n * sizeof(double), cudaMemcpyDeviceToHost);
+    return tu_;
 }
 
 vector<int> Model::getNumNeighbors() const {
@@ -234,4 +275,48 @@ vector<double> Model::getForces() const {
     vector<double> forces_(size * 2);
     cudaMemcpy(forces_.data(), forces, size * 2 * sizeof(double), cudaMemcpyDeviceToHost);
     return forces_;
+}
+
+// The neighbor cells are ordered so we can loop over the 
+// polygons in a cell. For each point, you count the
+// number of polygons it's in.
+// NOTE: This function modifies device-side intersectionsCounter and returns
+//       a normalized overlap area (fraction of points in overlapping polygons).
+void Model::updateOverlapArea(int pointDensity_) {
+    // allocate or reallocate the device-side counter buffer if density changed
+    if (pointDensity != pointDensity_) {
+        if (intersectionsCounter != nullptr) {
+            cudaFree(intersectionsCounter);
+            intersectionsCounter = nullptr;
+        }
+        size_t total = static_cast<size_t>(pointDensity_) * static_cast<size_t>(pointDensity_);
+        cudaMalloc((void**)&intersectionsCounter, total * sizeof(int));
+        // remember new density
+        pointDensity = pointDensity_;
+    }
+
+    // ensure the buffer is zeroed (CUDA kernel may overwrite but zeroing is cheap)
+    size_t total = static_cast<size_t>(pointDensity) * static_cast<size_t>(pointDensity);
+    cudaMemset(intersectionsCounter, 0, total * sizeof(int));
+
+    // call CUDA routine that computes and returns the raw sum of intersectionCounter entries
+    updateOverlapAreaCUDA(
+        shapeId,
+        startIndices,
+        pointDensity,
+        intersectionsCounter,
+        neighborIndices,
+        size,
+        boxSize,
+        countPerBox,
+        positions,
+        overlapArea
+    );
+
+    // normalize to fraction of sampled points -> overlap area estimate in [0,1]
+    overlapArea /= static_cast<double>(pointDensity * pointDensity);
+}
+
+double Model::getOverlapArea() const {
+    return overlapArea;
 }

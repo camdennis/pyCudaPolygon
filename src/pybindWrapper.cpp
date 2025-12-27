@@ -32,20 +32,25 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         // Getters
         .def("getNumVertices", &Model::getNumVertices)
         .def("getNumPolygons", &Model::getNumPolygons)
+        .def("getShapeId", &Model::getShapeId)
         .def("getPositions", &Model::getPositions)
+        .def("getIntersectionsCounter", &Model::getIntersectionsCounter)
         .def("getModelEnum", &Model::getModelEnum)
         .def("getStartIndices", &Model::getStartIndices)
         .def("getMaxEdgeLength", &Model::getMaxEdgeLength)
         .def("getAreas", &Model::getAreas)
         .def("getNeighborCells", &Model::getNeighborCells)
         .def("getNeighborIndices", &Model::getNeighborIndices)
-        // Bind both overloads of updateNeighbors: no-arg and one taking a double.
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
         .def("getBoxCounts", &Model::getBoxCounts)
         .def("getInsideFlag", &Model::getInsideFlag)
         .def("getPerimeters", &Model::getPerimeters)
-        // Calc Force Energy
-        .def("getForces", &Model::getForces);
-    }
+        .def("getForces", &Model::getForces)
+        .def("getTU", &Model::getTU)
+
+        // overlap area API
+        .def("updateOverlapArea", &Model::updateOverlapArea)
+        .def("getOverlapArea", &Model::getOverlapArea);
+}

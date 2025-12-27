@@ -11,10 +11,25 @@ import os
 import shutil
 import glob
 import sys
-#from scipy.special import gamma as gammaFunction
-#import scipy.fftpack as sp
+from collections import defaultdict
+# Load the `polygonMixins` package robustly so imports work whether this
+# module is loaded as a package or directly as a top-level module.
+try:
+    polygonMixins = importlib.import_module(__name__ + ".polygonMixins")
+except Exception:
+    try:
+        pkg_root = __name__.split(".")[0]
+        polygonMixins = importlib.import_module(pkg_root + ".polygonMixins")
+    except Exception:
+        # Last resort: try a plain import (works if sys.path is parent of package)
+        polygonMixins = importlib.import_module("polygonMixins")
 
-class model(lpcp.Model):
+mixins = {}
+for loader, moduleName, isPackage in pkgutil.walk_packages(polygonMixins.__path__):
+    module = importlib.import_module(polygonMixins.__name__ + "." + moduleName)
+    mixins[moduleName] = getattr(module, "Mixin")
+
+class model(lpcp.Model, *mixins.values()):
     def __init__(self, 
                  size = 0,
                  seed = None,
@@ -22,6 +37,11 @@ class model(lpcp.Model):
     ):
         lpcp.Model.__init__(self, size)
         self.setModelEnum(modelType)
+        if seed is None:
+            self.rng = np.random.default_rng()
+        else:
+            self.rng = np.random.default_rng(seed)
+#            lpcp.Model.initializeRandomSeed(self, seed)
     
     def setModelEnum(self, modelType):
         if modelType == "abnormal":
@@ -47,16 +67,21 @@ class model(lpcp.Model):
     def getNumPolygons(self):
         return lpcp.Model.getNumPolygons(self)
 
-    def initializeRandomSeed(self, seed = None):
-        if seed is None:
-            seed = np.random.randint(2**31)
+    def initializeRandomSeed(self, seed):
+        self.rng = np.random.default_rng(seed)
         lpcp.Model.initializeRandomSeed(self, seed)
 
     def setPositions(self, positions):
         lpcp.Model.setPositions(self, positions)
 
+    def getShapeId(self):
+        return np.array(lpcp.Model.getShapeId(self))
+
     def getPositions(self):
         return np.array(lpcp.Model.getPositions(self))
+
+    def getIntersectionsCounter(self):
+        return np.array(lpcp.Model.getIntersectionsCounter(self))
 
     def getNumNeighbors(self):
         return np.array(lpcp.Model.getNumNeighbors(self))
@@ -89,8 +114,31 @@ class model(lpcp.Model):
             insideDict[i] = allEl
         return insideDict
 
+    def getTU(self):
+        v = self.getNumVertices()
+        tu = np.array(lpcp.Model.getTU(self))
+        maxNeighbors = len(tu) // v // 2
+        t = tu[:v * maxNeighbors].reshape(v, maxNeighbors)
+        u = tu[v * maxNeighbors:].reshape(v, maxNeighbors)
+        tDict = dict()
+        uDict = dict()
+        numNeighbors = self.getNumNeighbors()
+        for i in range(len(t)):
+            allEl = t[i][:numNeighbors[i]]
+            if (len(allEl) == 0):
+                continue
+            tDict[i] = allEl
+            allEl = u[i][:numNeighbors[i]]
+            if (len(allEl) == 0):
+                continue
+            uDict[i] = allEl
+        return tDict, uDict
+
     def updateNeighbors(self, a):
         lpcp.Model.updateNeighbors(self, a)
+
+    def updateOverlapArea(self, pointDensity):
+        lpcp.Model.updateOverlapArea(self, pointDensity)
 
     def setnArray(self, nArray):
         nArray = nArray.astype(int)
@@ -98,7 +146,21 @@ class model(lpcp.Model):
         startIndices = np.concatenate(([0], np.cumsum(nArray)))
         lpcp.Model.setStartIndices(self, startIndices)
 
-    def setMaxEdgeLength(self, maxEdgeLength):
+    def setMaxEdgeLength(self, maxEdgeLength = None):
+        if maxEdgeLength is None:
+            maxEdgeLength = 0
+            nArray = self.getnArray()
+            numShapes = len(nArray)
+            startIndices = self.getStartIndices()
+            positions = self.getPositions()
+            for i in range(numShapes):
+                pos = positions[2 * startIndices[i]:2 * startIndices[i + 1]].reshape(nArray[i], 2)
+                diff = np.diff(np.concatenate((pos, [pos[0]])), axis = 0)
+                diff += 1.5
+                diff %= 1
+                diff -= 0.5
+                length = np.max(np.sqrt(np.sum(diff**2, axis = 1)))
+                maxEdgeLength = np.max([maxEdgeLength, length])
         lpcp.Model.setMaxEdgeLength(self, maxEdgeLength)
 
     def updateAreas(self):
@@ -134,67 +196,11 @@ class model(lpcp.Model):
         return np.array(lpcp.Model.getNeighborIndices(self))
 
     def generatePolygon(self, n):
-        def convex_hull(points):
-            pts = points[np.lexsort((points[:,1], points[:,0]))]
-            def half(pts):
-                h = []
-                for p in pts:
-                    while len(h) >= 2:
-                        r, q = h[-2], h[-1]
-                        if (q[0]-r[0])*(p[1]-r[1]) - (q[1]-r[1])*(p[0]-r[0]) <= 0:
-                            h.pop()
-                        else:
-                            break
-                    h.append(tuple(p))
-                return h
-            lower = half(pts)
-            upper = half(pts[::-1])
-            hull = np.array(lower[:-1] + upper[:-1])
-            return hull
-        pts = np.random.rand(max(8, n*3), 2) - 0.5           # oversample
-        hull = convex_hull(pts)
-        if len(hull) < n:
-            # subdivide hull edges to reach n
-            extra = []
-            i = 0
-            while len(hull) + len(extra) < n:
-                a = hull[i % len(hull)]
-                b = hull[(i+1) % len(hull)]
-                t = np.random.rand()
-                extra.append(a*(1-t) + b*t)
-                i += 1
-            hull = np.vstack([hull, np.array(extra)])
-        hull = hull[:n]       # trim if needed
-        return hull.reshape(n*2)
+        # Use the polygon generator from the mixins package.
+        from .mixins.polygon_utils import generate_polygon as _generate_polygon
+        return _generate_polygon(self.rng, n)
 
-    '''
-    def generatePolygons(self, nArray, areaArray):
-        nArray = nArray.astype(int)
-        totalN = np.sum(nArray).astype(int)
-        self.setNumVertices(totalN)
-        self.size = totalN
-        polygonPos = []
-        self.setnArray(nArray)
-        for i in range(len(nArray)):
-            n = nArray[i]
-            a = areaArray[i]
-            pos = self.generatePolygon(n) / 50
-            pos[::2] += np.random.rand()
-            pos[1::2] += np.random.rand()
-            polygonPos.append(pos)
-        polygonPos = np.concatenate(polygonPos)
-        pos += 1
-        pos %= 1
-        self.setPositions(polygonPos)
-        self.updateAreas()
-        areas = self.getAreas()
-        scaling = []
-        for i in range(len(nArray)):
-            scaling.append(np.sqrt(np.repeat(areaArray[i], nArray[i] * 2) / areas[i]))
-        scaling = np.concatenate(scaling)
-        self.setPositions(polygonPos * scaling)
-    '''
-    def draw(self, numbering = True):
+    def draw(self, numbering = False):
 
         def fixPXPY(px, py):
             minX = min(px)
@@ -213,7 +219,11 @@ class model(lpcp.Model):
         start = 0
         fig, ax = plt.subplots()
 
-        for n in self.getnArray():
+        nArray = self.getnArray()
+        cmap = plt.get_cmap('tab20')  # choose any colormap you prefer
+
+        for poly_idx, n in enumerate(nArray):
+            color = cmap(poly_idx % cmap.N)
             px = pos[start:start + 2 * n][::2]
             py = pos[start:start + 2 * n][1::2]
             px = np.concatenate((px, [px[0]]))
@@ -222,21 +232,26 @@ class model(lpcp.Model):
 
             for i in range(3):
                 for j in range(3):
-                    ax.plot(px + i - 1, py + j - 1, '-o', markersize=3)
+                    ax.plot(px + i - 1, py + j - 1,
+                            '-o', markersize=3,
+                            color=color,
+                            markerfacecolor=color,
+                            markeredgecolor=color)
 
-            # Label each vertex (except the repeated closing point)
-            for k in range(len(px) - 1):
-                textX = (px[k] + 1) % 1
-                textY = (py[k] + 1) % 1
-                ax.text(textX, textY, str(start//2 + k),
-                        fontsize=8, color='k', ha='left', va='bottom')
+            if (numbering):
+                for k in range(len(px) - 1):
+                    textX = (px[k] + 1) % 1
+                    textY = (py[k] + 1) % 1
+                    ax.text(textX, textY, str(start // 2 + k),
+                            fontsize = 8, color = 'k', ha = 'left', va = 'bottom')
 
             start += 2 * n
 
         ax.set_xlim([0, 1])
         ax.set_ylim([0, 1])
         ax.set_aspect(1)
-#        plt.show()
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     def getStartIndices(self):
         return lpcp.Model.getStartIndices(self)
@@ -286,7 +301,6 @@ class model(lpcp.Model):
         self.setnArray(state[:-self.getNumVertices() * 2].astype(int))
         self.setPositions(state[-self.getNumVertices() * 2:])
 
-
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
 
@@ -297,8 +311,8 @@ class model(lpcp.Model):
             pg = self.generatePolygon(n) / 2
             # Make the polygons smaller so they don't have image problems
             # perturb the polygons so they're centered randomly
-            pg[::2] += np.random.rand()
-            pg[1::2] += np.random.rand()
+            pg[::2] += self.rng.random()
+            pg[1::2] += self.rng.random()
             pg += 1
             pg %= 1
             pos.append(pg)
@@ -392,3 +406,131 @@ class model(lpcp.Model):
         totalArea = np.sum(areas)
         targetAreas = phi * areas / totalArea
         self.setAreas(targetAreas)
+
+    def whichShape(self, edge):
+        shapeId = np.argmin(abs(startIndices - edge))
+        if edge > startIndices[shapeId]:
+            shapeId -= 1
+        return shapeId
+
+    def isRealNeighbor(self, e1, e2):
+        startArray = self.getStartArray()
+        s1 = self.whichShape(e1)
+        s2 = self.whichShape(e2)
+        positions = self.getPositions()
+        a1x = positions[e1 * 2]
+        a1y = positions[e1 * 2 + 1]
+        b1x = positions[e2 * 2]
+        b1y = positions[e2 * 2 + 1]
+        if s1 < self.whichShape(e1 + 1):
+            v2 = startArray[s1]
+        else:
+            v2 = e1 + 1
+        a2x = positions[v2 * 2]
+        a2y = positions[v2 * 2 + 1]
+        if s2 < self.whichShape(e2 + 1):
+            v2 = startArray[s2]
+        else:
+            v2 = e2 + 1
+        b2x = positions[v2 * 2]
+        b2y = positions[v2 * 2 + 1]
+        r = np.array([a2x - a1x, a2y - a1y])
+        s = np.array([b2x - b1x, b2y - b1y])
+        g = np.array([b1x - a1x, b1y - a1y])
+        denom = np.linalg.det(r, s)
+        u = np.linalg.det([g, r]) / denom
+        t = np.linalg.det([g, s]) / denom
+        if (u < 0 or u > 1 or t < 0 or t > 1):
+            return False
+        return True
+
+    # We haven't found the neighbors properly yet. We still need to 
+    # implement that, but it's pretty easy so we can put it off for now.
+    # Let's assume we have all the edge intersections in "neighbors."
+    # We want to create a list that contains the exits
+    # and a list that contains the points that enter. This will
+    # help to find the players. However, we need to figure out how
+    # to get forces from the players. What information do we need?
+
+    def z(self, i):
+        startIndices = self.getStartIndices()
+        shapeId = self.getShapeId()[i]
+        if (i == startIndices[shapeId + 1] - 1):
+            return startIndices[shapeId]
+        return i + 1
+
+    def getIntersectionsAndOutersections(self):
+        self.updateNeighbors(0.0)
+        numVertices = self.getNumVertices()
+        intersections = defaultdict(list)
+        outersections = defaultdict(list)
+        t = defaultdict(list)
+        u = defaultdict(list)
+        insideFlagDict = self.getInsideFlag()
+        tDict, uDict = self.getTU()
+        shapeIds = self.getShapeId()
+        numShapes = self.getNumPolygons()
+        for key, value in self.getNeighbors().items():
+            for i, v in enumerate(value):
+                sh = np.min([shapeIds[v], shapeIds[key]]) * numShapes + np.max([shapeIds[v], shapeIds[key]])
+                if not insideFlagDict[key][i]:
+                    intersections[sh].append(key * numVertices + v)
+                    t[sh].append(tDict[key][i])
+                    outersections[sh].append(v * numVertices + key)
+                    u[sh].append(uDict[key][i])
+                else:
+                    outersections[sh].append(key * numVertices + v)
+                    t[sh].append(uDict[key][i])
+                    intersections[sh].append(v * numVertices + key)
+                    u[sh].append(tDict[key][i])
+        return intersections, t, outersections, u
+    
+    def getPlayers(self):
+        intersections, ts, outersections, us = self.getIntersectionsAndOutersections()
+        numVertices = self.getNumVertices()
+        players = []
+        playerLengths = []
+        nArray = self.getnArray()
+        shapeIds = self.getShapeId()
+        for key, values in intersections.items():
+            for iteration, v in enumerate(values):
+                i = v // numVertices
+                j = v % numVertices
+                ks = np.array(outersections[key]) // numVertices
+                ls = np.array(outersections[key]) % numVertices
+                # So i intersects j
+                # Does i outsect anything?
+                args = np.argwhere(ks == i).T[0]
+                if len(args) == 0:
+                    # Find where the thing exits
+                    minDist = 1e9
+                    n = nArray[shapeIds[i]]
+                    nextIndex = -1
+                    for index, k in enumerate(ks):
+                        if (n + k - i) % n < minDist:
+                            nextIndex = index
+                            minDist = (n + k - i) % n
+                    players.append(i)
+                    players.append(j)
+                    players.append(ks[nextIndex])
+                    players.append(ls[nextIndex])
+                    playerLengths.append(minDist + 2)
+                else:
+                    # Here we need to find the appropriate next index
+                    # by finding the next t/u
+                    t = ts[key][iteration]
+                    bestIndex = -1
+                    smallestU = 1e9
+                    for arg in args:
+                        u = us[key][arg]
+                        if (u < t):
+                            continue
+                        if (u < smallestU):
+                            bestIndex = arg
+                            smallestU = u
+                    players.append(i)
+                    players.append(j)
+                    players.append(ks[bestIndex])
+                    players.append(ls[bestIndex])
+                    playerLengths.append((n + ks[bestIndex] - i) % n + 2)
+        return np.array(players).reshape(len(players) // 4, 4), np.cumsum(np.concatenate((np.array([0]), np.array(playerLengths))))

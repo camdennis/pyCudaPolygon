@@ -11,6 +11,7 @@
 
 static const dim3 myBlockDim(16, 16);
 static const int blockSize = 256;
+static const double pi = 3.141592653589793238462643383279;
 
 
 __global__ void initStatesKernel(curandState *globalState, unsigned long long seed, int gridSize) {
@@ -116,10 +117,10 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         }
         double x = positions[v2 * 2] - positions[idx * 2] + 0.5;
         double y = positions[v2 * 2 + 1] - positions[idx * 2 + 1] + 0.5;
-        while (x < 1.0) {
+        while (x < 0.0) {
             x += 1.0;
         }
-        while (y < 1.0) {
+        while (y < 0.0) {
             y += 1.0;
         }
         while (x > 1.0) {
@@ -134,10 +135,10 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         y /= 2.0;
         x += positions[idx * 2];
         y += positions[idx * 2 + 1];
-        while (x < 1.0) {
+        while (x < 0.0) {
             x += 1.0;
         }
-        while (y < 1.0) {
+        while (y < 0.0) {
             y += 1.0;
         }
         while (x > 1.0) {
@@ -220,7 +221,9 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
     int boxSize,
     int* __restrict__ countPerBox,
     double a,
-    bool* __restrict__ inside
+    bool* __restrict__ inside,
+    double* t,
+    double* u
     ) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -304,12 +307,14 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
                 double denom = rx * sy - ry * sx;
                 if (fabs(denom) < eps) continue; // parallel or degenerate
 
-                double t = (gx * sy - gy * sx) / denom;
-                double u = (gx * ry - gy * rx) / denom;
+                double tt = (gx * sy - gy * sx) / denom;
+                double uu = (gx * ry - gy * rx) / denom;
 
-                if (t >= -a / rSize && t <= 1.0 + a / rSize && u >= -a / sSize && u <= 1.0 + a / sSize) {
+                if (tt >= -a / rSize && tt <= 1.0 + a / rSize && uu >= -a / sSize && uu <= 1.0 + a / sSize) {
                     if (neighborCount < maxNeighbors) {
                         neighbors[id1 * maxNeighbors + neighborCount] = nid;
+                        t[id1 * maxNeighbors + neighborCount] = tt;
+                        u[id1 * maxNeighbors + neighborCount] = uu;
                         if (denom > 0) {
                             inside[id1 * maxNeighbors + neighborCount] = true;
                         }
@@ -368,11 +373,18 @@ extern "C" int updateNeighborsCUDA(
     int* countPerBox,
     double a,
     int* maxActualNeighbors,
-    bool* inside
+    bool* inside,
+    double* t,
+    double* u
 ) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a, inside);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a, inside, t, u);
     cudaDeviceSynchronize();
+
+    // initialize device accumulator for reduction
+    int initVal = INT_MIN;
+    cudaMemcpy(maxActualNeighbors, &initVal, sizeof(int), cudaMemcpyHostToDevice);
+
     int threads = 256;
     int blocks = (size + threads - 1) / threads;
     maxReduceKernel<<<blocks, threads, threads * sizeof(int)>>>(numNeighbors, size, maxActualNeighbors);
@@ -382,3 +394,139 @@ extern "C" int updateNeighborsCUDA(
     return newMaxActualNeighbors;
 }
 
+__device__ inline double wrapPeriodic(double x) {
+    // Wrap x into [-0.5, 0.5)
+    x += 1.5;
+    while (x > 1.0) x -= 1.0;
+    return x - 0.5;
+}
+
+__global__ void updateOverlapAreaKernel(
+    const int* __restrict__ shapeId,
+    const int* __restrict__ startIndices,
+    int pointDensity,
+    int* __restrict__ intersectionCounter,
+    const int* __restrict__ neighborIndices,
+    int size,
+    int boxSize,
+    const int* __restrict__ countPerBox,
+    const double* __restrict__ positions
+) {
+    const double eps = 1e-12;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalPoints = pointDensity * pointDensity;
+    if (idx >= totalPoints) return;
+
+    int ix = idx % pointDensity;
+    int iy = idx / pointDensity;
+
+    // Center the point in its grid cell
+    double px = (ix + 0.5) / pointDensity;
+    double py = (iy + 0.5) / pointDensity;
+
+    intersectionCounter[idx] = 0;
+    int numIntersections = 0;
+
+    // Map to box
+    int cellX = int(px * boxSize);
+    int cellY = int(py * boxSize);
+    int boxCount = boxSize * boxSize;
+
+    // Track polygons we've already checked for this point
+    int trackedPolys[256];
+    int numTrackedPolys = 0;
+
+    // Iterate over 3x3 neighboring boxes
+    for (int dx = -1; dx <= 1; dx++) {
+        int nx = cellX + dx;
+        if (nx < 0) nx += boxSize;
+        else if (nx >= boxSize) nx -= boxSize;
+
+        for (int dy = -1; dy <= 1; dy++) {
+            int ny = cellY + dy;
+            if (ny < 0) ny += boxSize;
+            else if (ny >= boxSize) ny -= boxSize;
+
+            int boxId = ny * boxSize + nx;
+            int si = countPerBox[boxId];
+            int sf = (boxId + 1 < boxCount) ? countPerBox[boxId + 1] : size;
+
+            for (int nidx = si; nidx < sf; nidx++) {
+                int vid = neighborIndices[nidx];
+                int polyId = shapeId[vid];
+
+                // Skip polygons we've already checked
+                bool alreadyTracked = false;
+                for (int t = 0; t < numTrackedPolys; t++) {
+                    if (trackedPolys[t] == polyId) {
+                        alreadyTracked = true;
+                        break;
+                    }
+                }
+                if (alreadyTracked) continue;
+
+                int start = startIndices[polyId];
+                int end = startIndices[polyId + 1];
+                if (end - start < 3) continue; // Not a polygon
+
+                // Angle-sum test
+                double angleSum = 0.0;
+                double vxPrev = wrapPeriodic(positions[2*start] - px);
+                double vyPrev = wrapPeriodic(positions[2*start + 1] - py);
+                double vx0 = vxPrev + 0.0;
+                double vy0 = vyPrev + 0.0;
+
+                for (int e = start + 1; e < end; e++) {
+                    double vx = vxPrev + wrapPeriodic(positions[2*e] - positions[2*e - 2]);
+                    double vy = vyPrev + wrapPeriodic(positions[2*e + 1] - positions[2 * e - 1]);
+
+                    double cross = vxPrev * vy - vyPrev * vx;
+                    double dot = vxPrev * vx + vyPrev * vy;
+                    angleSum += atan2(cross, dot);
+
+                    vxPrev = vx;
+                    vyPrev = vy;
+                }
+
+                // Close the polygon loop
+                angleSum += atan2(vxPrev * vy0 - vyPrev * vx0, vxPrev * vx0 + vyPrev * vy0);
+
+                if (fabs(angleSum - 2.0 * pi) < eps) {
+                    numIntersections++;
+                }
+
+                // Track this polygon
+                if (numTrackedPolys < 256) {
+                    trackedPolys[numTrackedPolys++] = polyId;
+                }
+            }
+        }
+    }
+
+    intersectionCounter[idx] = numIntersections * (numIntersections - 1) / 2;
+}
+
+extern "C" void updateOverlapAreaCUDA(
+    int* shapeId,
+    int* startIndices,
+    int pointDensity,
+    int* intersectionCounter,
+    int* neighborIndices,
+    int size,
+    int boxSize,
+    int* countPerBox,
+    double* positions,
+    double& overlapArea
+) {
+    int total = pointDensity * pointDensity;
+    int numBlocks = (total + blockSize - 1) / blockSize;
+    updateOverlapAreaKernel<<<numBlocks, blockSize>>>(
+        shapeId, startIndices, pointDensity, intersectionCounter,
+        neighborIndices, size, boxSize, countPerBox, positions
+    );
+    cudaDeviceSynchronize();
+
+    thrust::device_ptr<int> d_ptr = thrust::device_pointer_cast(intersectionCounter);
+    long long sum = thrust::reduce(d_ptr, d_ptr + total, (long long)0);
+    overlapArea = (double)sum;
+}

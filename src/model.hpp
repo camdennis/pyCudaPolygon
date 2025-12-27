@@ -18,6 +18,7 @@ public:
     void setPositions(const vector<double>& positions_);
     int getNumVertices() const;
     int getNumPolygons() const;
+    vector<int> getShapeId() const;
     vector<double> getPositions() const;
     void setStartIndices(const vector<int>& startIndices_);
     vector<int> getStartIndices() const;
@@ -44,6 +45,12 @@ public:
     void updatePerimeters();
     vector<double> getPerimeters() const;
 
+    void updateOverlapArea(int pointDensity_);
+    double getOverlapArea() const;
+    void updateIntersectionsCounter();
+    vector<int> getIntersectionsCounter() const;
+    vector<double> getTU() const;
+
 private:
     simControlStruct simControl;  // Instance of simControlStruct
     int size, numPolygons;
@@ -68,6 +75,11 @@ private:
     int* maxActualNeighbors;
     bool* inside;
     double* perimeters;
+    int pointDensity = -1;
+    double overlapArea = 0.0;
+    // device buffer for per-sample intersection counts (added)
+    int* intersectionsCounter;
+    double* t, *u;
 };
 
 #endif
