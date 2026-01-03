@@ -1,274 +1,180 @@
 import numpy as np
 from matplotlib import pyplot as plt
+from scipy.linalg import circulant
 
 class Mixin():
-    def meanPerimeter(x, y):
-        dx = np.roll(x, -1) - x
-        dy = np.roll(y, -1) - y
-        return np.mean(np.sqrt(dx**2 + dy**2))
+    def __init__(self, rng = None):
+        # random number generator fallback
+        self.rng = rng if rng is not None else np.random.default_rng()
+        
+    def getRandomConvexPolygon(self, l):
+        l = np.asarray(l, dtype=float)
+        n = l.size
 
-    def meanPerimeterSquared(x, y):
-        dx = np.roll(x, -1) - x
-        dy = np.roll(y, -1) - y
-        return np.mean(dx**2 + dy**2)
+        # Polygon inequality
+        if np.max(l) > np.sum(l) - np.max(l):
+            raise ValueError("Side lengths violate polygon inequality.")
 
-    def area(x, y):
-        n = x.size
-        xC = np.concatenate((x, np.array([x[0]])))
-        yC = np.concatenate((y, np.array([y[0]])))
-        dx = xC[:-1] - xC[1:]
-        sy = yC[1:] + yC[:-1]
-        return np.sum(dx * sy) / 2
+        # Random turning angles summing to 2π
+        turns = self.rng.dirichlet(np.ones(n)) * 2 * np.pi
+        turns = np.pi - turns
+        return turns[1:]
 
-    def getShapeIndex(x, y):
-        n = x.size
-        return n * meanPerimeter(x, y) / np.sqrt(area(x, y))
+    def getPhi(self, theta):
+        phi = np.zeros(theta.size + 1)
+        for i in range(1, theta.size + 1):
+            phi[i] = phi[i - 1] + theta[i - 1]
+        phi = np.arange(theta.size + 1) * np.pi - phi
+        return phi
 
-    def g1(x, y, kappa):
-        n = x.size
-        return kappa * np.sqrt(area(x, y)) - n * meanPerimeter(x, y)
+    def getVertices(self, theta, l):
+        phi = self.getPhi(theta)
+        n = theta.size + 1
+        v = np.zeros((n + 1, 2))
+        for i in range(1, n + 1):
+            v[i] = v[i - 1] + l[i - 1] * np.array([np.cos(phi[i - 1]), np.sin(phi[i - 1])])
+        return v
 
-    def g2(x, y):
-        n = x.size
-        xC = np.concatenate((x, np.array([x[0]])))
-        yC = np.concatenate((y, np.array([y[0]])))
-        dx = xC[1:] - xC[:-1]
-        dy = yC[1:] - yC[:-1]
-        meanPerimeter = np.sum(np.sqrt(dx**2 + dy**2)) / n
-        return np.sum(dx**2 + dy**2) / n - meanPerimeter**2
+    def area(self, theta, l):
+        n = l.size
+        ct = np.concatenate(([0], np.cumsum(theta)))
+        sol = 0
+        for m in range(1, n):
+            for k in range(1, m):
+                sol += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.sin(ct[m - 1] - ct[k - 1])
+        return sol / 2
 
-    def L(x, y, vx, vy, kappa, lambda1, lambda2):
-        return np.sum((x - vx)**2 + (y - vy)**2 - lambda1 * g1(vx, vy, kappa) - lambda2 * g2(vx, vy))
+    def getShapeIndex(self, theta, l):
+        A = self.area(theta, l)
+        return np.sum(l) / np.sqrt(A)
 
-    def dAx(x, y):
-        nxty = np.roll(y, -1)
-        prvy = np.roll(y,  1)
-        return 0.5 * (nxty - prvy)
+    def dArea(self, theta, l):
+        n = l.size
+        ct = np.concatenate(([0], np.cumsum(theta)))
+        sol = np.zeros(n - 1)
+        for a in range(1, n):
+            for m in range(a + 1, n):
+                for k in range(1, a + 1):
+                    sol[a - 1] += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.cos(ct[m - 1] - ct[k - 1])
+        return sol / 2
 
-    def dAy(x, y):
-        nxtx = np.roll(x, -1)
-        prvx = np.roll(x,  1)
-        return -0.5 * (nxtx - prvx)
+    def ddArea(self, theta, l):
+        n = l.size
+        ct = np.concatenate(([0], np.cumsum(theta)))
+        sol = np.zeros((n - 1, n - 1))
+        for a in range(1, n):
+            for b in range(1, n):
+                cp = a
+                cm = b
+                if (cm > cp):
+                    (cp, cm) = (cm, cp)
+                for m in range(cp + 1, n):
+                    for k in range(1, cm + 1):
+                        sol[a - 1][b - 1] += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.sin(ct[m - 1] - ct[k - 1])
+        return -sol / 2
 
-    def dPx(x, y):
-        n = x.size
-        nxtx = np.roll(x, -1)
-        prvx = np.roll(x,  1)
-        nxty = np.roll(y, -1)
-        prvy = np.roll(y,  1)
+    def vn(self, theta, l):
+        phi = self.getPhi(theta)
+        return np.dot(l, np.array([np.cos(phi), np.sin(phi)]).T)
 
-        dxn = x - nxtx
-        dyn = y - nxty
-        dxp = x - prvx
-        dyp = y - prvy
+    def dvn(self, theta, l):
+        vertices = self.getVertices(theta, l)
+        vf = vertices[-1]
+        dv = vf - vertices[1:-1]
+        mat = np.array([[0, 1], [-1, 0]])
+        return np.dot(mat, dv.T).T
 
-        ln = np.sqrt(dxn**2 + dyn**2)
-        lp = np.sqrt(dxp**2 + dyp**2)
+    def ddvn(self, theta, l):
+        n = l.size
+        vertices = self.getVertices(theta, l)
+        vf = vertices[-1]
+        dv = vf - vertices[1:-1]
+        sol = np.zeros((n - 1, n - 1, 2))
+        for a in range(n - 1):
+            for b in range(n - 1):
+                sol[a][b] = -vf + vertices[1 + np.max([a, b])]
+        return sol
 
-        # numerical safety
-        eps = 1e-12
-        ln = np.maximum(ln, eps) / n
-        lp = np.maximum(lp, eps) / n
-        return dxn/ln + dxp/lp
+    def L(self, theta, l, theta0, a0, la, lam):
+        perimeter = np.sum(l)
+        vf = self.vn(theta, l)
+        A = self.area(theta, l)
+        return np.sum((theta - theta0)**2) - la * (A - a0) / perimeter**2 - np.dot(lam, vf) / perimeter
 
-    def dPy(x, y):
-        n = x.size
-        nxtx = np.roll(x, -1)
-        prvx = np.roll(x,  1)
-        nxty = np.roll(y, -1)
-        prvy = np.roll(y,  1)
+    def dL(self, theta, l, theta0, a0, la, lam):
+        perimeter = np.sum(l)
+        vf = self.vn(theta, l)
+        A = self.area(theta, l)
+        dLTheta = 2 * (theta - theta0) - la * self.dArea(theta, l) / perimeter**2 - np.dot(lam, self.dvn(theta, l).T).T / perimeter
+        dLLa = -(A - a0) / perimeter**2
+        dLLam = -vf / perimeter
+        return np.concatenate((dLTheta, [dLLa], dLLam))
 
-        dxn = x - nxtx
-        dyn = y - nxty
-        dxp = x - prvx
-        dyp = y - prvy
+    def ddL(self, theta, l, theta0, a0, la, lam):
+        perimeter = np.sum(l)
+        n = l.size
+        vf = self.vn(theta, l)
+        A = self.area(theta, l)
+        dA = self.dArea(theta, l)
+        ddA = self.ddArea(theta, l)
+        dvf = self.dvn(theta, l)
+        ddvf = self.ddvn(theta, l)
+        # Here's all the pieces
 
-        ln = np.sqrt(dxn**2 + dyn**2)
-        lp = np.sqrt(dxp**2 + dyp**2)
+        dLThetaTheta = 2 * np.identity(n - 1) - la * ddA / perimeter**2 - np.tensordot(ddvf, lam, axes=([2],[0])) / perimeter
 
-        # numerical safety
-        eps = 1e-12
-        ln = np.maximum(ln, eps) / n
-        lp = np.maximum(lp, eps) / n
-        return dyn/ln + dyp/lp
+        dLThetaLa = -dA / perimeter**2
+        dLThetaLam = -dvf / perimeter
 
-    def dP2x(x, y):
-        n = x.size
-        nxtx = np.roll(x, -1)
-        prvx = np.roll(x,  1)
-        return 2 * (2 * x - nxtx - prvx) / n
+        sol = np.zeros((n + 2, n + 2))
+        sol[:n - 1, :n - 1] = dLThetaTheta
+        sol[:n - 1, n - 1: n] = np.array([dLThetaLa]).T
+        sol[n - 1: n, :n - 1] = [dLThetaLa]
+        sol[:n - 1, n:] = dLThetaLam
+        sol[n:, :n - 1] = dLThetaLam.T
+        return sol
 
-    def dP2y(x, y):
-        n = x.size
-        nxty = np.roll(y, -1)
-        prvy = np.roll(y,  1)
-        return 2 * (2 * y - nxty - prvy) / n
+    def takeStep(self, theta, l, theta0, a0, la, lam, maxSteps=100, tol=1e-10):
+        n = l.size
+        counts = 0
+        for _ in range(maxSteps):
+            f = self.dL(theta, l, theta0, a0, la, lam)
+            Df = self.ddL(theta, l, theta0, a0, la, lam)
+            try:
+                s = np.linalg.solve(Df, -f)
+            except np.linalg.LinAlgError:
+                # singular Jacobian — stop iteration
+                raise Exception("Singular Jacobian")
+            # backtracking line search on step length
+            a = 1.0
+            fNorm = np.linalg.norm(f)
+            while a > 1e-8:
+                thetaNew = theta + a * s[:n - 1]
+                laNew = la + a * s[n - 1]
+                lamNew = lam + a * s[n:]
+                fNew = self.dL(thetaNew, l, theta0, a0, laNew, lamNew)
+                if np.linalg.norm(fNew) < fNorm:
+                    break
+                a *= 0.5
 
-    def dg1x(x, y, kappa):
-        n = x.size
-        A = area(x, y)
-        diffAx = dAx(x, y)
-        diffPx = dPx(x, y)
-        pref = kappa / (2 * np.sqrt(A))
-        return pref * diffAx - n * diffPx
+            counts += 1
+#            print(self.vn(thetaNew, l), self.area(thetaNew, l))
+            theta, la, lam = thetaNew, laNew, lamNew
+            yield theta, la, lam
 
-    def dg1y(x, y, kappa):
-        n = x.size
-        A = area(x, y)
-        diffAy = dAy(x, y)
-        diffPy = dPy(x, y)
-        pref = kappa / (2 * np.sqrt(A))
-        return pref * diffAy - n * diffPy
-
-    def dg2x(x, y):
-        meanP = meanPerimeter(x, y)
-        diffPx = dPx(x, y)
-        diffP2x = dP2x(x, y)
-        return diffP2x - 2 * meanP * diffPx
-
-    def dg2y(x, y):
-        meanP = meanPerimeter(x, y)
-        diffPy = dPy(x, y)
-        diffP2y = dP2y(x, y)
-        return diffP2y - 2 * meanP * diffPy
-
-    def dLx(x, y, vx, vy, kappa, lambda1, lambda2):
-        return 2 * (vx - x) - lambda1 * dg1x(vx, vy, kappa) - lambda2 * dg2x(vx, vy)
-
-    def dLy(x, y, vx, vy, kappa, lambda1, lambda2):
-        return 2 * (vy - y) - lambda1 * dg1y(vx, vy, kappa) - lambda2 * dg2y(vx, vy)
-
-    def dLl1(x, y, vx, vy, kappa, lambda1, lambda2):
-        return -g1(vx, vy, kappa)
-
-    def dLl2(x, y, vx, vy, kappa, lambda1, lambda2):
-        return - g2(vx, vy)
-
-    def ddAxy(x, y):
-        n = x.size
-        # Hessian of raw area
-        H = np.zeros((n, n))
-        for i in range(n):
-            previ = (i + n - 1) % n
-            nexti = (i + 1) % n
-            H[i, nexti] += 1
-            H[i, previ] -= 1
-        return H / 2
-
-    def ddPxx(x, y):
-        n = x.size
-        H = np.zeros((n, n))
-        for i in range(n):
-            previ = (i + n - 1) % n
-            nexti = (i + 1) % n
-            li = np.sqrt((x[i] - x[nexti])**2 + (y[i] - y[nexti])**2)
-            lzpi = np.sqrt((x[previ] - x[i])**2 + (y[previ] - y[i])**2)
-            H[i][i] += 1 / li
-            H[i][nexti] -= 1 / li
-            H[i][previ] -= 1 / lzpi
-            H[i][i] += 1 / lzpi
-            H[i][i] -= (x[i] - x[nexti]) / li**3
-            H[i][nexti] += (x[i] - x[nexti]) / li**3
-            H[i][previ] += (x[previ] - x[i]) / lzpi**3
-            H[i][i] -= (x[previ] - x[i]) / lzpi**3
-        return H / n
-
-    def ddPyy(x, y):
-        n = x.size
-        H = np.zeros((n, n))
-        for i in range(n):
-            previ = (i + n - 1) % n
-            nexti = (i + 1) % n
-            li = np.sqrt((x[i] - x[nexti])**2 + (y[i] - y[nexti])**2)
-            lzpi = np.sqrt((x[previ] - x[i])**2 + (y[previ] - y[i])**2)
-            H[i][i] += 1 / li
-            H[i][nexti] -= 1 / li
-            H[i][previ] -= 1 / lzpi
-            H[i][i] += 1 / lzpi
-            H[i][i] -= (y[i] - y[nexti]) / li**3
-            H[i][nexti] += (y[i] - y[nexti]) / li**3
-            H[i][previ] += (y[previ] - y[i]) / lzpi**3
-            H[i][i] -= (y[previ] - y[i]) / lzpi**3
-        return H / n
-
-    def ddPxy(x, y):
-        n = x.size
-        H = np.zeros((n, n))
-        for i in range(n):
-            previ = (i + n - 1) % n
-            nexti = (i + 1) % n
-            li = np.sqrt((x[i] - x[nexti])**2 + (y[i] - y[nexti])**2)
-            lzpi = np.sqrt((x[previ] - x[i])**2 + (y[previ] - y[i])**2)
-            H[i][i] -= (x[i] - x[nexti]) * (y[i] - y[nexti]) / li**3
-            H[i][nexti] += (x[i] - x[nexti]) * (y[i] - y[nexti]) / li**3
-            H[i][previ] += (x[previ] - x[i]) * (y[previ] - y[i]) / lzpi**3
-            H[i][i] -= (x[previ] - x[i]) * (y[previ] - y[i]) / lzpi**3
-        return H / n
-
-    def ddP2xx(x, y):
-        n = x.size
-        H = np.zeros((n, n))
-        for i in range(n):
-            nexti = (i + 1) % n
-            previ = (i + n - 1) % n
-            H[i][i] += 2
-            H[i][nexti] -= 1
-            H[i][previ] -= 1
-        return H * 2 / n
-
-    def ddP2yy(x, y):
-        n = x.size
-        H = np.zeros((n, n))
-        for i in range(n):
-            nexti = (i + 1) % n
-            previ = (i + n - 1) % n
-            H[i][i] += 2
-            H[i][nexti] -= 1
-            H[i][previ] -= 1
-        return H * 2 / n
-
-    def ddg1xx(x, y, kappa):
-        n = x.size
-        return - n * ddPxx(x, y)
-
-    def ddg1yy(x, y, kappa):
-        n = x.size
-        return - n * ddPyy(x, y)
-
-    def ddg1xy(x, y, kappa):
-        n = x.size
-        A = area(x, y)
-        pref = kappa / (2 * np.sqrt(A))
-        return pref * ddAxy(x, y)
-
-    def ddg2xx(x, y, kappa):
-        meanP = meanPerimeter(x, y)
-        diffPx = dPx(x, y)
-        return ddP2xx(x, y) - 2 * diffPx * diffPx - 2 * meanP * ddPxx
-
-    def ddg2yy(x, y, kappa):
-        meanP = meanPerimeter(x, y)
-        diffPy = dPy(x, y)
-        return ddP2yy(x, y) - 2 * diffPy * diffPy - 2 * meanP * ddPyy
-
-    def ddg2xy(x, y, kappa):
-        meanP = meanPerimeter(x, y)
-        diffPx = dPx(x, y)
-        diffPy = dPy(x, y)
-        return -2 * meanP * ddPxy(x, y) - 2 * diffPx * diffPy
-
-    def generateRandomPolygon(self, n, kappa, numSteps = 10, tol = 1e-10):
-        pts = np.random.rand(n, 2) - 0.5
-        center = pts.mean(axis = 0)
-        angles = np.arctan2(pts[:,1] - center[1],
-                            pts[:,0] - center[0])
-        x, y = pts[np.argsort(angles)].T
-        vx = x + 0
-        vy = y + 0
-        # Actually, let's make a square and perturb it a bit
-        x = np.array([-0.5, 0.5, 0.5, -0.5])
-        y = np.array([-0.5, -0.5, 0.5, 0.5])
-        vx = x + np.random.rand(4) / 100
-        vy = y + np.random.rand(4) / 100
-        l1 = np.random.rand() - 0.5
-        l2 = np.random.rand() - 0.5
+    def generateRandomPolygon(self, l, kappa, theta0 = None, numSteps = 10, tol = 1e-10):
+        if theta0 is None:
+            theta0 = self.getRandomConvexPolygon(l)
+        theta = theta0.copy()
+        a0 = (np.sum(l) / kappa)**2
+        la = self.rng.random()
+        lam = self.rng.random(2)
+        aStart = self.area(theta, l)
+        i = 0
+        for theta, la, lam in self.takeStep(theta, l, theta0, a0, la, lam, maxSteps = numSteps, tol = tol):
+            if np.abs(self.getShapeIndex(theta, l) - kappa) < tol and np.max(np.abs(self.vn(theta, l))) < tol:
+                break
+            i += 1
+        if i == numSteps:
+            print("Warning: It seems that this did not converge after " + str(i) + " steps")
+        return theta0, theta
