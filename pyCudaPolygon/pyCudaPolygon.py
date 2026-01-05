@@ -62,7 +62,7 @@ class model(lpcp.Model, *mixins.values()):
         lpcp.Model.setNumVertices(self, n)
 
     def getNumVertices(self):
-        return lpcp.Model.getNumVertices(self)
+        return int(lpcp.Model.getNumVertices(self))
 
     def getNumPolygons(self):
         return lpcp.Model.getNumPolygons(self)
@@ -101,43 +101,44 @@ class model(lpcp.Model, *mixins.values()):
         return neigh
 
     def getInsideFlag(self):
-        v = self.getNumVertices()
-        inside = np.array(lpcp.Model.getInsideFlag(self))
-        maxNeighbors = len(inside) // v
-        inside = inside.reshape(v, maxNeighbors)
-        insideDict = dict()
-        numNeighbors = self.getNumNeighbors()
-        for i, el in enumerate(inside):
-            allEl = el[:numNeighbors[i]]
-            if (len(allEl) == 0):
-                continue
-            insideDict[i] = allEl
-        return insideDict
+#        v = self.getNumVertices()
+        return np.array(lpcp.Model.getInsideFlag(self))
+#        maxNeighbors = len(inside) // v
+#        inside = inside.reshape(v, maxNeighbors)
+#        insideDict = dict()
+#        numNeighbors = self.getNumNeighbors()
+#        for i, el in enumerate(inside):
+#            allEl = el[:numNeighbors[i]]
+#            if (len(allEl) == 0):
+#                continue
+#            insideDict[i] = allEl
+#        return insideDict
 
     def getTU(self):
-        v = self.getNumVertices()
-        tu = np.array(lpcp.Model.getTU(self))
-        maxNeighbors = len(tu) // v // 2
-        t = tu[:v * maxNeighbors].reshape(v, maxNeighbors)
-        u = tu[v * maxNeighbors:].reshape(v, maxNeighbors)
-        tDict = dict()
-        uDict = dict()
-        numNeighbors = self.getNumNeighbors()
-        for i in range(len(t)):
-            allEl = t[i][:numNeighbors[i]]
-            if (len(allEl) == 0):
-                continue
-            tDict[i] = allEl
-            allEl = u[i][:numNeighbors[i]]
-            if (len(allEl) == 0):
-                continue
-            uDict[i] = allEl
-        return tDict, uDict
+#        v = self.getNumVertices()
+        return np.array(lpcp.Model.getTU(self))
+#        maxNeighbors = len(tu) // v // 2
+#        t = tu[:v * maxNeighbors].reshape(v, maxNeighbors)
+#        u = tu[v * maxNeighbors:].reshape(v, maxNeighbors)
+#        tDict = dict()
+#        uDict = dict()
+#        numNeighbors = self.getNumNeighbors()
+#        for i in range(len(t)):
+#            allEl = t[i][:numNeighbors[i]]
+#            if (len(allEl) == 0):
+#                continue
+#           tDict[i] = allEl
+#           allEl = u[i][:numNeighbors[i]]
+#           if (len(allEl) == 0):
+#               continue
+#            uDict[i] = allEl
+#        return tDict, uDict
 
     def updateNeighbors(self, a):
         lpcp.Model.updateNeighbors(self, a)
 
     def updateOverlapArea(self, pointDensity):
+        # This is MC
         lpcp.Model.updateOverlapArea(self, pointDensity)
 
     def setnArray(self, nArray):
@@ -164,12 +165,15 @@ class model(lpcp.Model, *mixins.values()):
         lpcp.Model.setMaxEdgeLength(self, maxEdgeLength)
 
     def updateAreas(self):
+        # This is MC
         lpcp.Model.updateAreas(self)
 
     def getAreas(self):
+        # This is MC for now
         return np.array(lpcp.Model.getAreas(self))
 
     def getAreaOfPos(self, pos):
+        # This is pythonic for now
         x = pos[::2]
         y = pos[1::2]
         x = np.concatenate((x, [x[0]]))
@@ -195,10 +199,39 @@ class model(lpcp.Model, *mixins.values()):
     def getNeighborIndices(self):
         return np.array(lpcp.Model.getNeighborIndices(self))
 
-    def generatePolygon(self, n):
-        # Use the polygon generator from the mixins package.
-        from .mixins.polygon_utils import generate_polygon as _generate_polygon
-        return _generate_polygon(self.rng, n)
+    def generateNaivePolygon(self, n):
+        def convex_hull(points):
+            pts = points[np.lexsort((points[:,1], points[:,0]))]
+            def half(pts):
+                h = []
+                for p in pts:
+                    while len(h) >= 2:
+                        r, q = h[-2], h[-1]
+                        if (q[0]-r[0])*(p[1]-r[1]) - (q[1]-r[1])*(p[0]-r[0]) <= 0:
+                            h.pop()
+                        else:
+                            break
+                    h.append(tuple(p))
+                return h
+            lower = half(pts)
+            upper = half(pts[::-1])
+            hull = np.array(lower[:-1] + upper[:-1])
+            return hull
+        pts = self.rng.random(max(8, n*3) * 2).reshape(max(8, n*3), 2) - 0.5           # oversample
+        hull = convex_hull(pts)
+        if len(hull) < n:
+            # subdivide hull edges to reach n
+            extra = []
+            i = 0
+            while len(hull) + len(extra) < n:
+                a = hull[i % len(hull)]
+                b = hull[(i+1) % len(hull)]
+                t = self.rng.random()
+                extra.append(a*(1-t) + b*t)
+                i += 1
+            hull = np.vstack([hull, np.array(extra)])
+        hull = hull[:n]       # trim if needed
+        return hull.reshape(n*2)
 
     def draw(self, numbering = False):
 
@@ -308,7 +341,7 @@ class model(lpcp.Model, *mixins.values()):
         # Generates random polygons with size similar to box size (so they're huge)
         pos = []
         for n in self.getnArray():
-            pg = self.generatePolygon(n) / 2
+            pg = self.generateNaivePolygon(n) / 2
             # Make the polygons smaller so they don't have image problems
             # perturb the polygons so they're centered randomly
             pg[::2] += self.rng.random()
@@ -449,8 +482,7 @@ class model(lpcp.Model, *mixins.values()):
     # Let's assume we have all the edge intersections in "neighbors."
     # We want to create a list that contains the exits
     # and a list that contains the points that enter. This will
-    # help to find the players. However, we need to figure out how
-    # to get forces from the players. What information do we need?
+    # help to find the players.
 
     def z(self, i):
         startIndices = self.getStartIndices()
@@ -459,78 +491,175 @@ class model(lpcp.Model, *mixins.values()):
             return startIndices[shapeId]
         return i + 1
 
-    def getIntersectionsAndOutersections(self):
+    def getIntersections(self):
+        def pack(numbers):
+            result = (numbers[3] & 0xFFFF) | \
+                    ((numbers[2] & 0xFFFF) << 16) | \
+                    ((numbers[1] & 0xFFFF) << 32) | \
+                    ((numbers[0] & 0xFFFF) << 48)
+            return result
+
+        def unpack(val):
+            """Unpack a 64-bit integer back into four 16-bit numbers."""
+            nums = np.zeros(4)
+            nums[3] = val & 0xFFFF
+            nums[2] = (val >> 16) & 0xFFFF
+            nums[1] = (val >> 32) & 0xFFFF
+            nums[0] = (val >> 48) & 0xFFFF
+            return nums  
+
+        def flipPack(val):
+            a = (val >> 48) & 0xFFFF
+            b = (val >> 32) & 0xFFFF
+            return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
+        
+        # Here we just update the neighbors. In practice I would like to implement
+        # Something to check the neighbors for intersection and then save that
         self.updateNeighbors(0.0)
         numVertices = self.getNumVertices()
-        intersections = defaultdict(list)
-        outersections = defaultdict(list)
-        t = defaultdict(list)
-        u = defaultdict(list)
-        insideFlagDict = self.getInsideFlag()
-        tDict, uDict = self.getTU()
+        neighbors = np.array(lpcp.Model.getNeighbors(self))
+        maxNeighbors = len(neighbors) // numVertices
+        numNeighbors = self.getNumNeighbors()
+        insideFlag = self.getInsideFlag()
         shapeIds = self.getShapeId()
         numShapes = self.getNumPolygons()
-        for key, value in self.getNeighbors().items():
-            for i, v in enumerate(value):
-                sh = np.min([shapeIds[v], shapeIds[key]]) * numShapes + np.max([shapeIds[v], shapeIds[key]])
-                if not insideFlagDict[key][i]:
-                    intersections[sh].append(key * numVertices + v)
-                    t[sh].append(tDict[key][i])
-                    outersections[sh].append(v * numVertices + key)
-                    u[sh].append(uDict[key][i])
+        intersections = []
+        for n1 in range(numVertices):
+            for i in range(numNeighbors[n1]):
+                s1 = shapeIds[n1]
+                n2 = neighbors[n1 * maxNeighbors + i]
+                s2 = shapeIds[n2]
+                if insideFlag[n1 * maxNeighbors + i]:
+                    intersection = pack([s2, s1, n1, n2])
                 else:
-                    outersections[sh].append(key * numVertices + v)
-                    t[sh].append(uDict[key][i])
-                    intersections[sh].append(v * numVertices + key)
-                    u[sh].append(tDict[key][i])
-        return intersections, t, outersections, u
+                    intersection = pack([s1, s2, n2, n1])
+                intersections.append(intersection)
+        intersections = np.array(intersections)
+        # Now we want to sort these!
+        intersections = np.sort(intersections)
+#        return intersections
+        # Now we want to find the start and end indices
+        starts = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
+        ends = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
+        packedShape = intersections.astype(np.uint64) >> np.uint64(32)
+        shapeStartFlag = np.concatenate(([True], np.diff(packedShape).astype(bool)))
+        bizarroIntersection = flipPack(intersections[0])
+        starts[bizarroIntersection] = 0
+        for i in range(1, len(intersections)):
+            if shapeStartFlag[i]:
+                bizarroIntersection = flipPack(intersections[i])
+                # This intersection, if you search it should start here
+                starts[bizarroIntersection] = i
+                # The intersection before this, if you search it should end before this
+                bizarroIntersectionM1 = flipPack(intersections[i - 1])
+                ends[bizarroIntersectionM1] = i - 1
+        # The last one ends as well
+        bizarroIntersection = flipPack(intersections[-1])
+        ends[bizarroIntersection] = len(intersections) - 1
+        return np.array(intersections), starts, ends
     
     def getPlayers(self):
-        intersections, ts, outersections, us = self.getIntersectionsAndOutersections()
-        numVertices = self.getNumVertices()
-        players = []
-        playerLengths = []
-        nArray = self.getnArray()
-        shapeIds = self.getShapeId()
-        for key, values in intersections.items():
-            for iteration, v in enumerate(values):
-                i = v // numVertices
-                j = v % numVertices
-                ks = np.array(outersections[key]) // numVertices
-                ls = np.array(outersections[key]) % numVertices
-                # So i intersects j
-                # Does i outsect anything?
-                args = np.argwhere(ks == i).T[0]
-                if len(args) == 0:
-                    # Find where the thing exits
-                    minDist = 1e9
-                    n = nArray[shapeIds[i]]
-                    nextIndex = -1
-                    for index, k in enumerate(ks):
-                        if (n + k - i) % n < minDist:
-                            nextIndex = index
-                            minDist = (n + k - i) % n
-                    players.append(i)
-                    players.append(j)
-                    players.append(ks[nextIndex])
-                    players.append(ls[nextIndex])
-                    playerLengths.append(minDist + 2)
+
+        def pack(numbers):
+            result = (numbers[3] & 0xFFFF) | \
+                    ((numbers[2] & 0xFFFF) << 16) | \
+                    ((numbers[1] & 0xFFFF) << 32) | \
+                    ((numbers[0] & 0xFFFF) << 48)
+            return result
+
+        def flipPack(val, flip = True):
+            a = (val >> 48) & 0xFFFF
+            b = (val >> 32) & 0xFFFF
+            if not flip:
+                (a, b) = (b, a)
+            return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
+
+        def flipPack2(val, flip = True):
+            a = (val >> 16) & 0xFFFF
+            b = val & 0xFFFF
+            if not flip:
+                (a, b) = (b, a)
+            return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
+
+        def findMinCyclic(a, i, ni, l, r):
+            def distance(j):
+                return (j - i + ni) % ni
+#            l, r = 0, len(a) - 1
+            while l < r:
+                mid = (l + r) // 2
+                if distance((a[mid] >> 16) & 0xFFFF) < distance((a[r] >> 16) & 0xFFFF):
+                    r = mid
+                elif distance((a[mid] >> 16) & 0xFFFF) > distance((a[r] >> 16) & 0xFFFF):
+                    l = mid + 1
                 else:
-                    # Here we need to find the appropriate next index
-                    # by finding the next t/u
-                    t = ts[key][iteration]
-                    bestIndex = -1
-                    smallestU = 1e9
-                    for arg in args:
-                        u = us[key][arg]
-                        if (u < t):
-                            continue
-                        if (u < smallestU):
-                            bestIndex = arg
-                            smallestU = u
-                    players.append(i)
-                    players.append(j)
-                    players.append(ks[bestIndex])
-                    players.append(ls[bestIndex])
-                    playerLengths.append((n + ks[bestIndex] - i) % n + 2)
-        return np.array(players).reshape(len(players) // 4, 4), np.cumsum(np.concatenate((np.array([0]), np.array(playerLengths))))
+                    # a[mid] == a[r], discard one duplicate
+                    r -= 1
+            return (a[l] >> 16) & 0xFFFF
+
+        def leftmost(a, val, l0, r0):
+            res = None
+            l, r = l0, r0
+            while l <= r:
+                mid = (l + r) // 2
+                if (a[mid] >> 16) & 0xFFFF < val:
+                    l = mid + 1
+                else:
+                    if (a[mid] >> 16) & 0xFFFF == val:
+                        res = mid
+                    r = mid - 1
+            if res is None:
+                return None, False
+            # Check if there is another occurrence to the right
+            only = (res == r0) or ((a[res + 1] >> 16) & 0xFFFF != val)
+            return res, only
+
+        def rightmost(a, val, l, r):
+            res = None
+            while l <= r:
+                mid = (l + r) // 2
+                if (a[mid] >> 16) & 0xFFFF  > val:
+                    r = mid - 1
+                else:
+                    if (a[mid] >> 16) & 0xFFFF  == val:
+                        res = mid
+                    l = mid + 1
+            return res
+
+        intersections, starts, ends = self.getIntersections()
+        numVertices = self.getNumVertices()
+        tu = self.getTU()
+        maxNeighbors = len(tu) // numVertices
+        numNeighbors = self.getNumNeighbors()
+        players = []
+        n = self.getnArray()
+        r = -1
+        for i in range(len(intersections)):
+            intersectionId = flipPack(intersections[i], flip = False)
+            start = starts[intersectionId]
+            end = ends[intersectionId]
+            # You want to do a binary search to find the index with the minimum distance
+            # Relative to i
+            ni = n[(intersections[i] >> 48) & 0xFFFF]
+            thisIntersectionsFirstElement = (intersections[i] & 0xFFFF)
+            minVal = findMinCyclic(intersections, thisIntersectionsFirstElement, ni, start, end)
+            l, only = leftmost(intersections, minVal, start, end)
+#            print(minVal, l, only)
+            uMin = np.inf
+            uMinArg = l
+            if not only:
+                r = rightmost(intersections, minVal, l, end)
+                # You'll need t
+                t = tu[intersections[i] & 0xFFFF]
+#                print(l, r)
+                for k in range(l, r + 1):
+                    u = tu[(intersections[k] >> 16) & 0xFFFF]
+                    if u < t:
+                        continue
+                    if u < uMin:
+                        uMin = u
+                        uMinArg = k
+            ijkl = flipPack2((intersections[i]) & 0xFFFFFFFF) << 32 | \
+                flipPack2((intersections[uMinArg]) & 0xFFFFFFFF)
+            players.append(ijkl)
+        return np.array(players)
+

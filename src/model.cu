@@ -194,11 +194,6 @@ extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, in
     );
 
     thrust::copy(
-        d_cellLocation.begin(), d_cellLocation.end(),
-        thrust::device_pointer_cast(cellLocation)
-    );
-
-    thrust::copy(
         d_neighborIndices.begin(), d_neighborIndices.end(),
         thrust::device_pointer_cast(neighborIndices)
     );
@@ -253,6 +248,9 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
 
     int neighborCount = 0;
 
+    int processedBoxes[16];
+    int numProcessedBoxes = 0;
+
     // iterate 3x3 neighborhood of boxes (with wrap)
     for (int dx = -1; dx <= 1; dx++) {
         int nx = bx + dx;
@@ -263,9 +261,22 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
 
             int newBox = ny * boxSize + nx;
 
+            // Skip if we've already processed this box
+            bool alreadyProcessed = false;
+            for (int b = 0; b < numProcessedBoxes; b++) {
+                if (processedBoxes[b] == newBox) {
+                    alreadyProcessed = true;
+                    break;
+                }
+            }
+            if (alreadyProcessed) continue;
+            if (numProcessedBoxes < 16) {
+                processedBoxes[numProcessedBoxes++] = newBox;
+            }
+
             int si = countPerBox[newBox];
             int sf = (newBox + 1 < boxCount) ? countPerBox[newBox + 1] : size;
-//            if (si >= sf) continue;
+            if (si >= sf) continue;
 
             // iterate entries in the neighborIndices array for this box
             for (int idx = si; idx < sf; idx++) {
