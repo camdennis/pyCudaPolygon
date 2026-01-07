@@ -285,6 +285,7 @@ class model(lpcp.Model, *mixins.values()):
         ax.set_aspect(1)
         ax.set_xticks([])
         ax.set_yticks([])
+        return ax
 
     def getStartIndices(self):
         return lpcp.Model.getStartIndices(self)
@@ -491,6 +492,13 @@ class model(lpcp.Model, *mixins.values()):
             return startIndices[shapeId]
         return i + 1
 
+    def zp(self, i):
+        startIndices = self.getStartIndices()
+        shapeId = self.getShapeId()[i]
+        if (i == startIndices[shapeId]):
+            return startIndices[shapeId + 1] - 1
+        return i - 1
+
     def getIntersections(self):
         def pack(numbers):
             result = (numbers[3] & 0xFFFF) | \
@@ -524,20 +532,31 @@ class model(lpcp.Model, *mixins.values()):
         shapeIds = self.getShapeId()
         numShapes = self.getNumPolygons()
         intersections = []
+        t, u = self.getTU().reshape(2, numVertices * maxNeighbors)
+        newTU = []
         for n1 in range(numVertices):
             for i in range(numNeighbors[n1]):
                 s1 = shapeIds[n1]
                 n2 = neighbors[n1 * maxNeighbors + i]
                 s2 = shapeIds[n2]
+                tVal = t[n1 * maxNeighbors + i]
+                uVal = u[n1 * maxNeighbors + i]
                 if insideFlag[n1 * maxNeighbors + i]:
                     intersection = pack([s2, s1, n1, n2])
+                    newTU.append(uVal)
+                    newTU.append(tVal)
                 else:
                     intersection = pack([s1, s2, n2, n1])
+                    newTU.append(tVal)
+                    newTU.append(uVal)
                 intersections.append(intersection)
         intersections = np.array(intersections)
+        numIntersections = intersections.size
+        newTU = np.array(newTU).reshape(numIntersections, 2)
         # Now we want to sort these!
-        intersections = np.sort(intersections)
-#        return intersections
+        args = np.argsort(intersections)
+        intersections = intersections[args]
+        newTU = newTU[args].reshape(numIntersections * 2)
         # Now we want to find the start and end indices
         starts = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
         ends = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
@@ -556,7 +575,7 @@ class model(lpcp.Model, *mixins.values()):
         # The last one ends as well
         bizarroIntersection = flipPack(intersections[-1])
         ends[bizarroIntersection] = len(intersections) - 1
-        return np.array(intersections), starts, ends
+        return np.array(intersections), newTU, starts, ends
     
     def getPlayers(self):
 
@@ -625,14 +644,13 @@ class model(lpcp.Model, *mixins.values()):
                     l = mid + 1
             return res
 
-        intersections, starts, ends = self.getIntersections()
+        intersections, newTU, starts, ends = self.getIntersections()
         numVertices = self.getNumVertices()
-        tu = self.getTU()
-        maxNeighbors = len(tu) // numVertices
         numNeighbors = self.getNumNeighbors()
-        players = []
         n = self.getnArray()
         r = -1
+        numIntersections = len(intersections)
+        players = np.zeros(numIntersections, dtype = int)
         for i in range(len(intersections)):
             intersectionId = flipPack(intersections[i], flip = False)
             start = starts[intersectionId]
@@ -649,17 +667,83 @@ class model(lpcp.Model, *mixins.values()):
             if not only:
                 r = rightmost(intersections, minVal, l, end)
                 # You'll need t
-                t = tu[intersections[i] & 0xFFFF]
+                tVal = newTU[2 * i]
 #                print(l, r)
                 for k in range(l, r + 1):
-                    u = tu[(intersections[k] >> 16) & 0xFFFF]
+                    # Is this the right u value?
+                    u = newTU[2 * k + 1]
                     if u < t:
                         continue
                     if u < uMin:
                         uMin = u
                         uMinArg = k
-            ijkl = flipPack2((intersections[i]) & 0xFFFFFFFF) << 32 | \
-                flipPack2((intersections[uMinArg]) & 0xFFFFFFFF)
-            players.append(ijkl)
-        return np.array(players)
+            players[i] = uMinArg
+        return players
+
+    def getOverlapArea(self):
+        return np.array(lpcp.Model.getOverlapArea(self))
+
+    def getOverlapAreaPY(self):
+        def h(pt1, pt2):
+            # Get dh
+            dy = pt2[1] - pt1[1] + 1.5
+            dx = pt2[0] - pt1[0] + 1.5
+            dy %= 1
+            dx %= 1
+            dy -= 0.5
+            dx -= 0.5
+            return (2 * pt1[0] + dx) * dy
+
+        intersections, newTU, starts, ends = self.getIntersections()
+        players = self.getPlayers()
+        positions = self.getPositions()
+        x = positions[::2]
+        y = positions[1::2]
+        allF = np.zeros((2 * len(players), 2))
+        sol = 0
+        shapeId = self.getShapeId()
+        nArray = self.getnArray()
+        for index in range(len(players)):
+            # s(i), s(j), j, i
+            i = intersections[index] & 0xFFFF
+            j = (intersections[index] >> 16) & 0xFFFF
+            k = intersections[players[index]] & 0xFFFF
+            l = (intersections[players[index]] >> 16) & 0xFFFF
+            pi = positions[2 * i: 2 * i + 2]
+            zi = self.z(i)
+            pzi = positions[2 * zi: 2 * zi + 2]
+            pk = positions[2 * k: 2 * k + 2]
+            zk = self.z(k)
+            pzk = positions[2 * zk: 2 * zk + 2]
+            r1 = pzi - pi + 1.5
+            r2 = pzk - pk + 1.5
+            r1 %= 1
+            r1 -= 0.5
+            r2 %= 1
+            r2 -= 0.5
+            t1 = newTU[2 * index]
+            fij = (pi + t1 * r1 + 1) % 1
+            t2 = newTU[2 * players[index]]
+            fkl = (pk + t2 * r2 + 1) % 1
+            if (i == l):
+                sol += h(fij, fkl)
+                continue
+            else:
+                sol += h(fij, positions[self.z(i) * 2: self.z(i) * 2 + 2])
+                sol += h(positions[l * 2: l * 2 + 2], fkl)
+            n = nArray[shapeId[i]]
+            dist = (l - i + n) % n
+            if dist < 2:
+                continue
+            currIndex = self.z(i)
+            endIndex = self.z(l)
+            while (currIndex != endIndex):
+                nextIndex = self.z(currIndex)
+                sol += h(positions[currIndex * 2 : currIndex * 2 + 2],
+                    positions[nextIndex * 2: nextIndex * 2 + 2])
+                currIndex = nextIndex
+            sol += h(positions[currIndex * 2 : currIndex * 2 + 2],
+                    positions[l * 2: l * 2 + 2])
+        return sol / 2
+
 
