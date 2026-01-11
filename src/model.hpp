@@ -66,7 +66,7 @@ private:
     int* shapeId;
     int* neighbors;
     int boxesUsed;
-    int maxNeighbors = 10;
+    int maxNeighbors = 100;
     int boxSize;
     int* numNeighbors;
     bool updateMaxNeighbors = false;
