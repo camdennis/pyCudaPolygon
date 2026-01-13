@@ -535,6 +535,7 @@ class model(lpcp.Model, *mixins.values()):
         intersections = []
         t, u = self.getTU().reshape(2, numVertices * maxNeighbors)
         newTU = []
+        numEach = np.zeros(numShapes, dtype = int)
         for n1 in range(numVertices):
             for i in range(numNeighbors[n1]):
                 s1 = shapeIds[n1]
@@ -544,13 +545,17 @@ class model(lpcp.Model, *mixins.values()):
                 uVal = u[n1 * maxNeighbors + i]
                 if insideFlag[n1 * maxNeighbors + i]:
                     intersection = pack([s2, s1, n1, n2])
+                    numEach[s2] += 1
                     newTU.append(uVal)
                     newTU.append(tVal)
                 else:
                     intersection = pack([s1, s2, n2, n1])
+                    numEach[s1] += 1
                     newTU.append(tVal)
                     newTU.append(uVal)
                 intersections.append(intersection)
+        ends = np.cumsum(numEach)
+        starts = np.concatenate(([0], ends[:-1]))
         intersections = np.array(intersections)
         numIntersections = intersections.size
         newTU = np.array(newTU).reshape(numIntersections, 2)
@@ -559,26 +564,26 @@ class model(lpcp.Model, *mixins.values()):
         intersections = intersections[args]
         newTU = newTU[args].reshape(numIntersections * 2)
         # Now we want to find the start and end indices
-        starts = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
-        ends = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
+        bizarroStarts = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
+        bizarroEnds = np.zeros(np.uint64(numVertices)  << np.uint64(16), dtype = int)
         if (len(intersections) == 0):
-            return intersections, newTU, starts, ends
+            return intersections, newTU, starts, ends, bizarroStarts, bizarroEnds
         packedShape = intersections.astype(np.uint64) >> np.uint64(32)
         shapeStartFlag = np.concatenate(([True], np.diff(packedShape).astype(bool)))
         bizarroIntersection = flipPack(intersections[0])
-        starts[bizarroIntersection] = 0
+        bizarroStarts[bizarroIntersection] = 0
         for i in range(1, len(intersections)):
             if shapeStartFlag[i]:
                 bizarroIntersection = flipPack(intersections[i])
                 # This intersection, if you search it should start here
-                starts[bizarroIntersection] = i
+                bizarroStarts[bizarroIntersection] = i
                 # The intersection before this, if you search it should end before this
                 bizarroIntersectionM1 = flipPack(intersections[i - 1])
-                ends[bizarroIntersectionM1] = i - 1
+                bizarroEnds[bizarroIntersectionM1] = i - 1
         # The last one ends as well
         bizarroIntersection = flipPack(intersections[-1])
-        ends[bizarroIntersection] = len(intersections) - 1
-        return intersections, newTU, starts, ends
+        bizarroEnds[bizarroIntersection] = len(intersections) - 1
+        return intersections, newTU, starts, ends, bizarroStarts, bizarroEnds
     
     def getPlayers(self):
 
@@ -647,7 +652,7 @@ class model(lpcp.Model, *mixins.values()):
                     l = mid + 1
             return res
 
-        intersections, newTU, starts, ends = self.getIntersections()
+        intersections, newTU, _, _, starts, ends = self.getIntersections()
         numVertices = self.getNumVertices()
         numNeighbors = self.getNumNeighbors()
         n = self.getnArray()
@@ -685,8 +690,8 @@ class model(lpcp.Model, *mixins.values()):
     def getOverlapArea(self):
         return np.array(lpcp.Model.getOverlapArea(self))
 
-    def getOverlapAreaPY(self, h):
-        intersections, newTU, starts, ends = self.getIntersections()
+    def functionalExterior(self, h):
+        intersections, newTU, _, _, starts, ends = self.getIntersections()
         if (len(intersections) == 0):
             return 0
         players = self.getPlayers()
@@ -731,16 +736,42 @@ class model(lpcp.Model, *mixins.values()):
                 sol += h(fij, fkl, startPoint)
                 continue
             else:
+                pass
                 sol += h(fij, positions[self.z(i) * 2: self.z(i) * 2 + 2], startPoint)
                 sol += h(positions[l * 2: l * 2 + 2], fkl, startPoint)
-            n = nArray[shapeId[i]]
-            dist = (l - i + n) % n
-            if dist < 2:
-                continue
-            currIndex = self.z(i)
-            while (currIndex != l):
-                nextIndex = self.z(currIndex)
-                sol += h(positions[currIndex * 2 : currIndex * 2 + 2],
-                    positions[nextIndex * 2: nextIndex * 2 + 2], startPoint)
-                currIndex = nextIndex
         return sol / 2
+
+    def functionalInterior(self, h):
+        numVertices = self.getNumVertices()
+        players = self.getPlayers()
+        shapeId = self.getShapeId()
+        intersections, newTU, starts, ends, _, _ = self.getIntersections()
+        nArray = self.getnArray()
+        startIndices = self.getStartIndices()
+        positions = self.getPositions()
+        sol = 0
+        for m in range(numVertices):
+            s = shapeId[m]
+            n = nArray[s]
+#            print("m", m, starts[s], ends[s])
+            for index in range(starts[s], ends[s]):
+                i = intersections[index] & 0xFFFF
+                l = (intersections[players[index]] >> 16) & 0xFFFF
+                sj = (intersections[index] >> 32) & 0xFFFF
+                si = (intersections[index] >> 48) & 0xFFFF
+                startID = startIndices[si]
+                startIDj = min(startID, startIndices[sj])
+                mf = (m + n - i - 2 * startID) % n + i - startID
+                lf = (l + n - i - 2 * startID) % n + i - startID
+                if (mf == i - startID or mf == lf):
+                    continue
+                if (mf < lf):
+                    # This intersection does matter
+                    startPoint = positions[2 * startIDj : 2 * startIDj + 2]
+                    nextIndex = self.z(m)
+                    sol += h(positions[m * 2: m * 2 + 2],
+                        positions[nextIndex * 2: nextIndex * 2 + 2], startPoint)
+        return sol / 2
+
+    def functional(self, h):
+        return self.functionalExterior(h) + self.functionalInterior(h)
