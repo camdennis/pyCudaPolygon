@@ -416,7 +416,7 @@ __global__ void updateOverlapAreaKernel(
     const int* __restrict__ shapeId,
     const int* __restrict__ startIndices,
     int pointDensity,
-    int* __restrict__ intersectionCounter,
+    int* __restrict__ intersectionsCounter,
     const int* __restrict__ neighborIndices,
     int size,
     int boxSize,
@@ -435,7 +435,7 @@ __global__ void updateOverlapAreaKernel(
     double px = (ix + 0.5) / pointDensity;
     double py = (iy + 0.5) / pointDensity;
 
-    intersectionCounter[idx] = 0;
+    intersectionsCounter[idx] = 0;
     int numIntersections = 0;
 
     // Map to box
@@ -482,14 +482,14 @@ __global__ void updateOverlapAreaKernel(
 
                 // Angle-sum test
                 double angleSum = 0.0;
-                double vxPrev = wrapPeriodic(positions[2*start] - px);
-                double vyPrev = wrapPeriodic(positions[2*start + 1] - py);
+                double vxPrev = wrapPeriodic(positions[2 * start] - px);
+                double vyPrev = wrapPeriodic(positions[2 * start + 1] - py);
                 double vx0 = vxPrev + 0.0;
                 double vy0 = vyPrev + 0.0;
 
                 for (int e = start + 1; e < end; e++) {
-                    double vx = vxPrev + wrapPeriodic(positions[2*e] - positions[2*e - 2]);
-                    double vy = vyPrev + wrapPeriodic(positions[2*e + 1] - positions[2 * e - 1]);
+                    double vx = vxPrev + wrapPeriodic(positions[2 * e] - positions[2 * e - 2]);
+                    double vy = vyPrev + wrapPeriodic(positions[2 * e + 1] - positions[2 * e - 1]);
 
                     double cross = vxPrev * vy - vyPrev * vx;
                     double dot = vxPrev * vx + vyPrev * vy;
@@ -501,7 +501,6 @@ __global__ void updateOverlapAreaKernel(
 
                 // Close the polygon loop
                 angleSum += atan2(vxPrev * vy0 - vyPrev * vx0, vxPrev * vx0 + vyPrev * vy0);
-
                 if (fabs(angleSum - 2.0 * pi) < eps) {
                     numIntersections++;
                 }
@@ -514,14 +513,15 @@ __global__ void updateOverlapAreaKernel(
         }
     }
 
-    intersectionCounter[idx] = numIntersections * (numIntersections - 1) / 2;
+    intersectionsCounter[idx] = numIntersections * (numIntersections - 1) / 2;
+//    intersectionsCounter[idx] = numIntersections;
 }
 
 extern "C" void updateOverlapAreaCUDA(
     int* shapeId,
     int* startIndices,
     int pointDensity,
-    int* intersectionCounter,
+    int* intersectionsCounter,
     int* neighborIndices,
     int size,
     int boxSize,
@@ -532,12 +532,12 @@ extern "C" void updateOverlapAreaCUDA(
     int total = pointDensity * pointDensity;
     int numBlocks = (total + blockSize - 1) / blockSize;
     updateOverlapAreaKernel<<<numBlocks, blockSize>>>(
-        shapeId, startIndices, pointDensity, intersectionCounter,
+        shapeId, startIndices, pointDensity, intersectionsCounter,
         neighborIndices, size, boxSize, countPerBox, positions
     );
     cudaDeviceSynchronize();
 
-    thrust::device_ptr<int> d_ptr = thrust::device_pointer_cast(intersectionCounter);
+    thrust::device_ptr<int> d_ptr = thrust::device_pointer_cast(intersectionsCounter);
     long long sum = thrust::reduce(d_ptr, d_ptr + total, (long long)0);
     overlapArea = (double)sum;
 }

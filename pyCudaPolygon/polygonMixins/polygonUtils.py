@@ -1,6 +1,11 @@
 import numpy as np
 from matplotlib import pyplot as plt
 from scipy.linalg import circulant
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+import time
+import functools
+import threading
 
 class Mixin():
     def __init__(self, rng = None):
@@ -38,11 +43,25 @@ class Mixin():
     def area(self, theta, l):
         n = l.size
         ct = np.concatenate(([0], np.cumsum(theta)))
-        sol = 0
-        for m in range(1, n):
-            for k in range(1, m):
-                sol += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.sin(ct[m - 1] - ct[k - 1])
-        return sol / 2
+
+        # Indices m, k in zero-based Python indexing
+        m = np.arange(1, n)[:, None]   # shape (n-1, 1)
+        k = np.arange(1, n)[None, :]   # shape (1, n-1)
+
+        # Mask to enforce k < m
+        mask = k < m
+
+        # (-1)^(m - k + 1) - use modulo for numerical stability
+        sign = 1 - 2 * ((m - k + 1) % 2)
+
+        # Core expression
+        term = (
+            l[m - 1] * l[k - 1]
+            * sign
+            * np.sin(ct[m - 1] - ct[k - 1])
+        )
+
+        return np.sum(term[mask]) / 2
 
     def getShapeIndex(self, theta, l):
         A = self.area(theta, l)
@@ -51,27 +70,67 @@ class Mixin():
     def dArea(self, theta, l):
         n = l.size
         ct = np.concatenate(([0], np.cumsum(theta)))
-        sol = np.zeros(n - 1)
-        for a in range(1, n):
-            for m in range(a + 1, n):
-                for k in range(1, a + 1):
-                    sol[a - 1] += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.cos(ct[m - 1] - ct[k - 1])
-        return sol / 2
+
+        idx = np.arange(1, n)
+        m = idx[:, None]
+        k = idx[None, :]
+
+        sign = 1 - 2 * ((m - k + 1) % 2)
+
+        K = (
+            l[m - 1] * l[k - 1]
+            * sign
+            * np.cos(ct[m - 1] - ct[k - 1])
+        )
+
+        # sum over k ≤ a
+        Kc = np.cumsum(K, axis=1)
+
+        # exclude m = a
+        Kc[np.arange(n-1), np.arange(n-1)] = 0
+
+        # sum over m > a
+        Kcm = np.cumsum(Kc[::-1], axis=0)[::-1]
+        rows = np.arange(n - 1)
+        cols = rows
+        return Kcm[rows, cols] / 2
 
     def ddArea(self, theta, l):
         n = l.size
         ct = np.concatenate(([0], np.cumsum(theta)))
+
+        idx = np.arange(1, n)
+        m = idx[:, None]
+        k = idx[None, :]
+
+        sign = 1 - 2 * ((m - k + 1) % 2)
+
+        K = (
+            l[m - 1] * l[k - 1]
+            * sign
+            * np.sin(ct[m - 1] - ct[k - 1])
+        )
+
+        # prefix sums
+        Kk = np.cumsum(K, axis=1)
+        Kmk = np.cumsum(Kk[::-1], axis=0)[::-1]
+
+        A = np.arange(1, n)[:, None]
+        B = np.arange(1, n)[None, :]
+
+        cp = np.maximum(A, B)
+        cm = np.minimum(A, B)
+
+        mi = cp
+        ki = cm - 1
+
         sol = np.zeros((n - 1, n - 1))
-        for a in range(1, n):
-            for b in range(1, n):
-                cp = a
-                cm = b
-                if (cm > cp):
-                    (cp, cm) = (cm, cp)
-                for m in range(cp + 1, n):
-                    for k in range(1, cm + 1):
-                        sol[a - 1][b - 1] += l[m - 1] * l[k - 1] * (-1)**(m - k + 1) * np.sin(ct[m - 1] - ct[k - 1])
+        mask = (mi < n - 1) & (ki >= 0)
+
+        sol[mask] = Kmk[mi[mask], ki[mask]]
+
         return -sol / 2
+
 
     def vn(self, theta, l):
         phi = self.getPhi(theta)
@@ -111,12 +170,15 @@ class Mixin():
         return np.concatenate((dLTheta, [dLLa], dLLam))
 
     def ddL(self, theta, l, theta0, a0, la, lam):
+        timeList = np.zeros(2)
         perimeter = np.sum(l)
         n = l.size
         vf = self.vn(theta, l)
         A = self.area(theta, l)
         dA = self.dArea(theta, l)
+        timeList[0] = time.time()
         ddA = self.ddArea(theta, l)
+        timeList[1] = time.time()
         dvf = self.dvn(theta, l)
         ddvf = self.ddvn(theta, l)
         # Here's all the pieces
@@ -137,7 +199,7 @@ class Mixin():
     def takeStep(self, theta, l, theta0, a0, la, lam, maxSteps=100, tol=1e-10):
         n = l.size
         counts = 0
-        for _ in range(maxSteps):
+        for step in range(maxSteps):
             f = self.dL(theta, l, theta0, a0, la, lam)
             Df = self.ddL(theta, l, theta0, a0, la, lam)
             try:
@@ -148,7 +210,8 @@ class Mixin():
             # backtracking line search on step length
             a = 1.0
             fNorm = np.linalg.norm(f)
-            while a > 1e-8:
+            threshold = 1e-5
+            while a > threshold:
                 thetaNew = theta + a * s[:n - 1]
                 laNew = la + a * s[n - 1]
                 lamNew = lam + a * s[n:]
@@ -156,13 +219,15 @@ class Mixin():
                 if np.linalg.norm(fNew) < fNorm:
                     break
                 a *= 0.5
+            if (a < threshold):
+                raise Exception("Stuck in a bad shape")
 
             counts += 1
 #            print(self.vn(thetaNew, l), self.area(thetaNew, l))
             theta, la, lam = thetaNew, laNew, lamNew
             yield theta, la, lam
 
-    def generateRandomPolygon(self, l, kappa, theta0 = None, numSteps = 10, tol = 1e-10):
+    def generateRandomPolygon(self, l, kappa, theta0 = None, numSteps = 200, tol = 1e-10):
         if theta0 is None:
             theta0 = self.getRandomConvexPolygon(l)
         theta = theta0.copy()
@@ -176,5 +241,41 @@ class Mixin():
                 break
             i += 1
         if i == numSteps:
+            raise Exception("It seems that this did not converge after" + str(i) + " steps")
             print("Warning: It seems that this did not converge after " + str(i) + " steps")
         return theta0, theta
+
+    def generateRandomPolygons(self, numPolygons, n, kappa, phi):
+        def rotate(vertices, angle):
+            cx, cy = np.mean(vertices, axis = 0)
+            for i in range(len(vertices)):
+                xNew = (vertices[i][0] - cx) * np.cos(angle) - (vertices[i][1] - cy) * np.sin(angle) + cx
+                yNew = (vertices[i][0] - cx) * np.sin(angle) + (vertices[i][1] - cy) * np.cos(angle) + cy
+                vertices[i] = [xNew, yNew]
+            return vertices              
+
+        self.setnArray(np.ones(numPolygons) * n)
+        numPolygons = self.getNumPolygons()
+        numVertices = self.getNumVertices()
+        positions = np.zeros((numVertices, 2))
+        l = np.ones(n)
+        targetArea = phi / numPolygons
+        i = 0
+        fail = 0
+        while i < numPolygons:
+            try:
+                theta0, theta = self.generateRandomPolygon(l, kappa)
+            except:
+                fail += 1 
+                continue
+            lScale = np.sqrt(self.area(theta, l))
+            pos = self.getVertices(theta, l)[:-1] * np.sqrt(targetArea) / lScale
+            pos = rotate(pos, self.rng.random() * 2 * np.pi)
+            # Do a random translation
+            pos[:, 0] += self.rng.random()
+            pos[:, 1] += self.rng.random()
+            positions[i * n: (i + 1) * n] = pos
+            i += 1
+        positions += 2.0
+        positions %= 1.0
+        self.setPositions(positions.reshape(numVertices * 2))

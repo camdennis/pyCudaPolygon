@@ -233,60 +233,6 @@ class model(lpcp.Model, *mixins.values()):
         hull = hull[:n]       # trim if needed
         return hull.reshape(n*2)
 
-    def draw(self, numbering = False):
-
-        def fixPXPY(px, py):
-            minX = min(px)
-            maxX = max(px)
-            minY = min(py)
-            maxY = max(py)
-            px += 1.5 - minX
-            py += 1.5 - minY
-            px %= 1
-            py %= 1
-            px += minX - 0.5
-            py += minY - 0.5
-            return px, py
-
-        pos = self.getPositions()
-        start = 0
-        fig, ax = plt.subplots()
-
-        nArray = self.getnArray()
-        cmap = plt.get_cmap('tab20')  # choose any colormap you prefer
-
-        for poly_idx, n in enumerate(nArray):
-            color = cmap(poly_idx % cmap.N)
-            px = pos[start:start + 2 * n][::2]
-            py = pos[start:start + 2 * n][1::2]
-            px = np.concatenate((px, [px[0]]))
-            py = np.concatenate((py, [py[0]]))
-            px, py = fixPXPY(px, py)
-
-            for i in range(3):
-                for j in range(3):
-                    ax.plot(px + i - 1, py + j - 1,
-                            '-o', markersize=3,
-                            color=color,
-                            markerfacecolor=color,
-                            markeredgecolor=color)
-
-            if (numbering):
-                for k in range(len(px) - 1):
-                    textX = (px[k] + 1) % 1
-                    textY = (py[k] + 1) % 1
-                    ax.text(textX, textY, str(start // 2 + k),
-                            fontsize = 8, color = 'k', ha = 'left', va = 'bottom')
-
-            start += 2 * n
-
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
-        ax.set_aspect(1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        return ax
-
     def getStartIndices(self):
         return lpcp.Model.getStartIndices(self)
 
@@ -668,14 +614,12 @@ class model(lpcp.Model, *mixins.values()):
             thisIntersectionsFirstElement = (intersections[i] & 0xFFFF)
             minVal = findMinCyclic(intersections, thisIntersectionsFirstElement, ni, start, end)
             l, only = leftmost(intersections, minVal, start, end)
-#            print(minVal, l, only)
             uMin = np.inf
             uMinArg = l
             if not only:
                 r = rightmost(intersections, minVal, l, end)
                 # You'll need t
                 tVal = newTU[2 * i]
-#                print(l, r)
                 for k in range(l, r + 1):
                     # Is this the right u value?
                     uVal = newTU[2 * k + 1]
@@ -690,10 +634,16 @@ class model(lpcp.Model, *mixins.values()):
     def getOverlapArea(self):
         return np.array(lpcp.Model.getOverlapArea(self))
 
-    def functionalExterior(self, h):
+    def getIntersectionsCounter(self):
+        intersectionsCounter = np.array(lpcp.Model.getIntersectionsCounter(self))
+        s = int(np.sqrt(len(intersectionsCounter)))
+        return intersectionsCounter.reshape(s, s)
+
+    def functionalExterior(self, h, g12 = None, lam = 0, pref = 1):
+        numVertices = self.getNumVertices()
         intersections, newTU, _, _, starts, ends = self.getIntersections()
         if (len(intersections) == 0):
-            return 0
+            return 0, np.zeros(numVertices * 2)
         players = self.getPlayers()
         positions = self.getPositions()
         x = positions[::2]
@@ -704,6 +654,7 @@ class model(lpcp.Model, *mixins.values()):
         nArray = self.getnArray()
         allF = np.zeros((len(players) * 2, 2))
         startIndices = self.getStartIndices()
+        grad = np.zeros(numVertices * 2)
         for index in range(len(players)):
             # s(i), s(j), j, i
             startID1 = startIndices[(intersections[index] >> 48) & 0xFFFF]
@@ -716,9 +667,15 @@ class model(lpcp.Model, *mixins.values()):
             l = (intersections[players[index]] >> 16) & 0xFFFF
             pi = positions[2 * i: 2 * i + 2]
             zi = self.z(i)
+            zj = self.z(j)
             pzi = positions[2 * zi: 2 * zi + 2]
+            pj = positions[2 * j: 2 * j + 2]
+            pzj = positions[2 * zj: 2 * zj + 2]
             pk = positions[2 * k: 2 * k + 2]
             zk = self.z(k)
+            zl = self.z(l)
+            pl = positions[2 * l: 2 * l + 2]
+            pzl = positions[2 * zl: 2 * zl + 2]
             pzk = positions[2 * zk: 2 * zk + 2]
             r1 = pzi - pi + 1.5
             r2 = pzk - pk + 1.5
@@ -733,15 +690,45 @@ class model(lpcp.Model, *mixins.values()):
             allF[index * 2] = fij
             allF[index * 2 + 1] = fkl
             if (i == l):
-                sol += h(fij, fkl, startPoint)
-                continue
+                sol += h(fij, fkl, startPoint, lam, pref)
+                if (g12 is not None):
+                    dfij = self.getDf(pi, pzi, pj, pzj)  # i<->j
+                    dfki = self.getDf(pk, pzk, pi, pzi)  # k<->i
+                    g1, g2 = g12(fij, fkl, startPoint, lam, pref)
+                    for alpha in range(2):
+                        # i and zi contributions
+                        grad[i * 2 + alpha]  += np.dot(g1, dfij[:, 0 + alpha]) + np.dot(g2, dfki[:, 4 + alpha])
+                        grad[zi * 2 + alpha] += np.dot(g1, dfij[:, 2 + alpha]) + np.dot(g2, dfki[:, 6 + alpha])
+                        
+                        # j and zj contributions
+                        grad[j * 2 + alpha]  += np.dot(g1, dfij[:, 4 + alpha])
+                        grad[zj * 2 + alpha] += np.dot(g1, dfij[:, 6 + alpha])
+                        
+                        # k and zk contributions
+                        grad[k * 2 + alpha]  += np.dot(g2, dfki[:, 0 + alpha])
+                        grad[zk * 2 + alpha] += np.dot(g2, dfki[:, 2 + alpha])
             else:
-                pass
-                sol += h(fij, positions[self.z(i) * 2: self.z(i) * 2 + 2], startPoint)
-                sol += h(positions[l * 2: l * 2 + 2], fkl, startPoint)
-        return sol / 2
+                sol += h(fij, positions[self.z(i) * 2: self.z(i) * 2 + 2], startPoint, lam, pref)
+                sol += h(positions[l * 2: l * 2 + 2], fkl, startPoint, lam, pref)
+                if (g12 is not None):
+                    g1, g2 = g12(fij, pzi, startPoint, lam, pref)
+                    dfij = self.getDf(pi, pzi, pj, pzj)  # i<->j
+                    dfkl = self.getDf(pk, pzk, pl, pzl)  # k<->i
+                    for alpha in range(2):
+                        grad[i * 2 + alpha] += np.dot(g1, dfij[:, 0 + alpha])
+                        grad[j * 2 + alpha] += np.dot(g1, dfij[:, 4 + alpha])
+                        grad[zi * 2 + alpha] += np.dot(g1, dfij[:, 2 + alpha]) + g2[alpha]
+                        grad[zj * 2 + alpha] += np.dot(g1, dfij[:, 6 + alpha])
+                    g1, g2 = g12(pl, fkl, startPoint, lam, pref)
+                    for alpha in range(2):
+                        grad[l * 2 + alpha] += g1[alpha] + np.dot(g2, dfkl[:, 4 + alpha])
+                        grad[k * 2 + alpha] += np.dot(g2, dfkl[:, 0 + alpha])
+                        grad[zl * 2 + alpha] += np.dot(g2, dfkl[:, 6 + alpha])
+                        grad[zk * 2 + alpha] += np.dot(g2, dfkl[:, 2 + alpha])
+        return sol, -grad
 
-    def functionalInterior(self, h):
+    def functionalInterior(self, h, g12 = None, lam = 0, pref = 1):
+        self.updateNeighbors(0.0)
         numVertices = self.getNumVertices()
         players = self.getPlayers()
         shapeId = self.getShapeId()
@@ -750,28 +737,183 @@ class model(lpcp.Model, *mixins.values()):
         startIndices = self.getStartIndices()
         positions = self.getPositions()
         sol = 0
+        grad = np.zeros(numVertices * 2)
         for m in range(numVertices):
             s = shapeId[m]
             n = nArray[s]
-#            print("m", m, starts[s], ends[s])
             for index in range(starts[s], ends[s]):
                 i = intersections[index] & 0xFFFF
                 l = (intersections[players[index]] >> 16) & 0xFFFF
                 sj = (intersections[index] >> 32) & 0xFFFF
                 si = (intersections[index] >> 48) & 0xFFFF
                 startID = startIndices[si]
-                startIDj = min(startID, startIndices[sj])
+                startPointID = min(startID, startIndices[sj])
                 mf = (m + n - i - 2 * startID) % n + i - startID
                 lf = (l + n - i - 2 * startID) % n + i - startID
                 if (mf == i - startID or mf == lf):
                     continue
                 if (mf < lf):
                     # This intersection does matter
-                    startPoint = positions[2 * startIDj : 2 * startIDj + 2]
+                    startPoint = positions[2 * startPointID : 2 * startPointID + 2]
                     nextIndex = self.z(m)
-                    sol += h(positions[m * 2: m * 2 + 2],
-                        positions[nextIndex * 2: nextIndex * 2 + 2], startPoint)
-        return sol / 2
+                    p1 = positions[m * 2: m * 2 + 2]
+                    p2 = positions[nextIndex * 2: nextIndex * 2 + 2]
+                    sol += h(p1, p2, startPoint, lam, pref)
+                    if (not (g12 is None)):
+                        g1, g2 = g12(p1, p2, startPoint, lam, pref)
+                        grad[m * 2] += g1[0]
+                        grad[m * 2 + 1] += g1[1]
+                        grad[nextIndex * 2] += g2[0]
+                        grad[nextIndex * 2 + 1] += g2[1]
+        return sol, -grad
 
-    def functional(self, h):
-        return self.functionalExterior(h) + self.functionalInterior(h)
+    def functional(self, h, g12 = None, lam = 0, pref = 1):
+        eef = self.functionalExterior(h, g12 = g12, lam = lam, pref = pref)
+        try:
+            exterior, exteriorForce = eef
+        except TypeError:
+            print("eef = ", eef)
+
+
+        interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
+        return exterior + interior, exteriorForce + interiorForce
+    
+    def minimizeGDStep(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3):
+        self.initializeNeighborCells()
+        self.updateNeighborCells()
+        self.updateNeighbors(0)
+        overlapArea, force = self.functional(h = h, g12 = g12, lam = lam, pref = pref)
+        force = self.getConstrainedForce(force)
+        positions = self.getPositions()
+        positions += dt * force
+        self.setPositions(positions)
+
+    def getDf(self, vi, vzi, vj, vzj):
+        dj = vzj - vj + 1.5
+        di = vzi - vi + 1.5
+        dij = vj - vi + 1.5
+        dj %= 1
+        di %= 1
+        dij %= 1
+        dj -= 0.5
+        di -= 0.5
+        dij -= 0.5
+
+        w = dj[0]*di[1] - dj[1]*di[0]
+        k = dj[0]*dij[1] - dj[1]*dij[0]
+        u = k / w   # kept as requested
+
+        df = np.zeros((2, 8))
+
+        dk = np.zeros((2, 4))
+        dk[0, 0] = dj[1]
+        dk[0, 2] = -dij[1] - dj[1]
+        dk[0, 3] = dij[1]
+        dk[1, 0] = -dj[0]
+        dk[1, 2] = dj[0] + dij[0]
+        dk[1, 3] = -dij[0]
+
+        dw = np.zeros((2, 4))
+        dw[0, 0] = dj[1]
+        dw[0, 1] = -dj[1]
+        dw[0, 2] = -di[1]
+        dw[0, 3] = di[1]
+        dw[1, 0] = -dj[0]
+        dw[1, 1] = dj[0]
+        dw[1, 2] = di[0]
+        dw[1, 3] = -di[0]
+
+        for alpha in range(2):
+            for beta in range(2):
+                for p in range(4):
+                    du = dk[beta, p] / w - u * dw[beta, p] / w
+                    df[alpha, 2 * p + beta] += di[alpha] * du   # += is crucial
+
+                if alpha == beta:
+                    df[alpha, beta] += 1 - u
+                    df[alpha, 2 + beta] += u
+
+        return df
+
+    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100):
+        for step in range(maxSteps):
+            if (step % 100 == 0):
+                print(step)
+            self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref)
+
+    def getConstraintMatrix(self):
+        shapeId = self.getShapeId()
+        numVertices = self.getNumVertices()
+        gl = np.zeros(2 * numVertices)
+        gl2 = np.zeros(2 * numVertices)
+        positions = self.getPositions()
+        nArray = self.getnArray()
+        ap = np.zeros(nArray.size)
+        da = np.zeros(2 * numVertices)
+        startIndices = self.getStartIndices()
+        for j in range(numVertices):
+            dp1 = positions[j * 2 : j * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp2 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[j * 2 : j * 2 + 2]
+            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp1 += 1.5
+            dp2 += 1.5
+            dp3 += 1.5
+            dp1 %= 1
+            dp2 %= 1
+            dp3 %= 1
+            dp1 -= 0.5
+            dp2 -= 0.5
+            dp3 -= 0.5
+            denom1 = np.sqrt(np.sum(dp1**2))
+            denom2 = np.sqrt(np.sum(dp2**2))
+            gl[j * 2 : j * 2 + 2] = dp1 / denom1 - dp2 / denom2
+            gl2[j * 2 : j * 2 + 2] = 2 * (dp1 - dp2)
+            da[j * 2 : j * 2 + 2] = (np.arange(2) - 0.5) * dp3[::-1]
+            startID = startIndices[shapeId[j]]
+            startPoint = positions[2 * startID : 2 * startID + 2]
+            dpp1 = positions[2 * self.z(j) : 2 * self.z(j) + 2] - startPoint
+            dpp2 = positions[2 * j : 2 * j + 2] - startPoint
+            dpp1 += 1.5
+            dpp2 += 1.5
+            dpp1 %= 1
+            dpp2 %= 1
+            dpp1 -= 0.5
+            dpp2 -= 0.5
+            ap[shapeId[j]] += (dpp1 + dpp2)[1] * dp2[0] / 2
+#        print("ap = ", -ap)
+        ap = np.repeat(ap, nArray)
+        startPoints = np.concatenate((np.array([0]), np.cumsum(nArray)))
+        lVals = np.zeros(numVertices * 2)
+#        for p in range(self.getNumPolygons()):
+#            for point in range(startPoints[p], startPoints[p + 1]):
+#                nextPoint = self.z(point)
+#                dl = positions[nextPoint * 2 : nextPoint * 2 + 2] - positions[point * 2 : point * 2 + 2]
+#                dl += 1.5
+#                dl %= 1
+#                dl -= 0.5
+#                lVals[point] = np.sqrt(np.sum(dl**2))
+#        print("lMean = ", np.mean(lVals))
+#        print("lVar = ", np.var(lVals))
+#        print("aMean = ", np.mean(ap))
+#        print("aVar = ", np.var(ap))
+        da2 = np.zeros(2 * numVertices)
+        for j in range(numVertices):
+            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp3 += 1.5
+            dp3 %= 1
+            dp3 -= 0.5
+            da2[j * 2 : j * 2 +  2] = (np.arange(2) - 0.5) * dp3[::-1] * ap[j]
+        # Now we orthonormalize
+        dg = np.array(np.vstack((gl, gl2, da, da2)))
+        dg, _ = np.linalg.qr(dg.T)
+        return dg.T
+
+    def getConstrainedForce(self, force):
+        Q = self.getConstraintMatrix()
+        numVertices = self.getNumVertices()
+        Q2 = Q @ Q.T
+        proj = np.identity(numVertices * 2) - np.dot(Q.T, Q)
+        return np.dot(proj, force)
+
+    
+

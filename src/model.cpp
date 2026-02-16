@@ -22,7 +22,7 @@ extern "C" void updateOverlapAreaCUDA(
     int* shapeId,
     int* startIndices,
     int pointDensity,
-    int* intersectionCounter,
+    int* intersectionsCounter,
     int* neighborIndices,
     int size,
     int boxSize,
@@ -118,6 +118,13 @@ void Model::updateNeighbors(double a) {
     // reset device-side max tracker for next run
 //    resetMaxActualNeighbors();
 }
+
+//void Model::updateIntersectingEdges(double a) {
+    // first attempt
+//    updateIntersectingEdgesCUDA(shapeId, startIndices, positions, cellLocation,
+//                              neighborIndices, size, neighbors, numNeighbors,
+//                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside, t, u);
+//}
 
 void Model::setModelEnum(simControlStruct::modelEnum modelType_) {
     simControl.modelType = modelType_;
@@ -299,7 +306,7 @@ void Model::updateOverlapArea(int pointDensity_) {
     size_t total = static_cast<size_t>(pointDensity) * static_cast<size_t>(pointDensity);
     cudaMemset(intersectionsCounter, 0, total * sizeof(int));
 
-    // call CUDA routine that computes and returns the raw sum of intersectionCounter entries
+    // call CUDA routine that computes and returns the raw sum of intersectionsCounter entries
     updateOverlapAreaCUDA(
         shapeId,
         startIndices,

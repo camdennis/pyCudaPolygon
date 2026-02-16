@@ -52,5 +52,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         // overlap area API
         .def("updateOverlapArea", &Model::updateOverlapArea)
-        .def("getOverlapArea", &Model::getOverlapArea);
+        .def("getOverlapArea", &Model::getOverlapArea)
+        .def("getIntersectionsCounter", &Model::getIntersectionsCounter);
 }
