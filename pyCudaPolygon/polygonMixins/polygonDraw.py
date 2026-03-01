@@ -20,7 +20,7 @@ class Mixin():
             px += minX - 0.5
             py += minY - 0.5
             return px, py
-
+        artists = []
         pos = self.getPositions()
         start = 0
         fStart = 0
@@ -45,13 +45,14 @@ class Mixin():
 
             for i in range(3):
                 for j in range(3):
-                    ax.plot((px + i - 1) * axisSize, (py + j - 1) * axisSize,
+                    line, = ax.plot((px + i - 1) * axisSize, (py + j - 1) * axisSize,
                             '-o', markersize=ms,
                             color=color,
                             markerfacecolor=color,
                             markeredgecolor=color)
+                    artists.append(line)
                     if (forces is not None):
-                        ax.quiver(px + i - 1, py + j - 1,
+                        quiver = ax.quiver(px + i - 1, py + j - 1,
                             fx, fy, angles = 'xy',
                             scale_units = 'xy',
                             scale = 1,
@@ -60,13 +61,15 @@ class Mixin():
                             headwidth = 3,
                             headlength = 4
                         )
+                        artists.append(quiver)
 
             if (numbering):
                 for k in range(len(px) - 1):
                     textX = (px[k] + 1) % 1
                     textY = (py[k] + 1) % 1
-                    ax.text(textX * axisSize, textY * axisSize, str(start // 2 + k),
+                    txt = ax.text(textX * axisSize, textY * axisSize, str(start // 2 + k),
                             fontsize = 8, color = 'k', ha = 'left', va = 'bottom')
+                    artists.append(txt)
 
             start += 2 * n
             fStart += 2 * n
@@ -76,4 +79,4 @@ class Mixin():
         ax.set_aspect(1)
         ax.set_xticks([])
         ax.set_yticks([])
-        return ax
+        return artists

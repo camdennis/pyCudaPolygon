@@ -532,103 +532,61 @@ class model(lpcp.Model, *mixins.values()):
         return intersections, newTU, starts, ends, bizarroStarts, bizarroEnds
     
     def getPlayers(self):
-
-        def pack(numbers):
-            result = (numbers[3] & 0xFFFF) | \
-                    ((numbers[2] & 0xFFFF) << 16) | \
-                    ((numbers[1] & 0xFFFF) << 32) | \
-                    ((numbers[0] & 0xFFFF) << 48)
-            return result
-
-        def flipPack(val, flip = True):
-            a = (val >> 48) & 0xFFFF
-            b = (val >> 32) & 0xFFFF
-            if not flip:
-                (a, b) = (b, a)
-            return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
-
-        def flipPack2(val, flip = True):
-            a = (val >> 16) & 0xFFFF
-            b = val & 0xFFFF
-            if not flip:
-                (a, b) = (b, a)
-            return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
-
-        def findMinCyclic(a, i, ni, l, r):
-            def distance(j):
-                return (j - i + ni) % ni
-#            l, r = 0, len(a) - 1
-            while l < r:
-                mid = (l + r) // 2
-                if distance((a[mid] >> 16) & 0xFFFF) < distance((a[r] >> 16) & 0xFFFF):
-                    r = mid
-                elif distance((a[mid] >> 16) & 0xFFFF) > distance((a[r] >> 16) & 0xFFFF):
-                    l = mid + 1
-                else:
-                    # a[mid] == a[r], discard one duplicate
-                    r -= 1
-            return (a[l] >> 16) & 0xFFFF
-
-        def leftmost(a, val, l0, r0):
-            res = None
-            l, r = l0, r0
-            while l <= r:
-                mid = (l + r) // 2
-                if (a[mid] >> 16) & 0xFFFF < val:
-                    l = mid + 1
-                else:
-                    if (a[mid] >> 16) & 0xFFFF == val:
-                        res = mid
-                    r = mid - 1
-            if res is None:
-                return None, False
-            # Check if there is another occurrence to the right
-            only = (res == r0) or ((a[res + 1] >> 16) & 0xFFFF != val)
-            return res, only
-
-        def rightmost(a, val, l, r):
-            res = None
-            while l <= r:
-                mid = (l + r) // 2
-                if (a[mid] >> 16) & 0xFFFF  > val:
-                    r = mid - 1
-                else:
-                    if (a[mid] >> 16) & 0xFFFF  == val:
-                        res = mid
-                    l = mid + 1
-            return res
-
         intersections, newTU, _, _, starts, ends = self.getIntersections()
-        numVertices = self.getNumVertices()
-        numNeighbors = self.getNumNeighbors()
         n = self.getnArray()
         numIntersections = len(intersections)
-        players = np.zeros(numIntersections, dtype = int)
-        for i in range(len(intersections)):
-            intersectionId = flipPack(intersections[i], flip = False)
+        players = np.empty(numIntersections, dtype=int)
+
+        for i in range(numIntersections):
+            this_i = intersections[i] & 0xFFFF
+            vertex = (intersections[i] >> 48) & 0xFFFF
+            ni = n[vertex]
+
+            # Slice of neighbors
+            intersectionId = ((intersections[i] >> 32) & 0xFFFF) | (((intersections[i] >> 48) & 0xFFFF) << 16)
             start = starts[intersectionId]
             end = ends[intersectionId]
-            # You want to do a binary search to find the index with the minimum distance
-            # Relative to i
-            ni = n[(intersections[i] >> 48) & 0xFFFF]
-            thisIntersectionsFirstElement = (intersections[i] & 0xFFFF)
-            minVal = findMinCyclic(intersections, thisIntersectionsFirstElement, ni, start, end)
-            l, only = leftmost(intersections, minVal, start, end)
-            uMin = np.inf
-            uMinArg = l
-            if not only:
-                r = rightmost(intersections, minVal, l, end)
-                # You'll need t
-                tVal = newTU[2 * i]
-                for k in range(l, r + 1):
-                    # Is this the right u value?
-                    uVal = newTU[2 * k + 1]
-                    if uVal < tVal:
-                        continue
-                    if uVal < uMin:
-                        uMin = uVal
-                        uMinArg = k
-            players[i] = uMinArg
+
+            tVal = newTU[2 * i]
+
+            bestDist = None
+            bestU = np.inf
+            bestIdx = None
+            fallbackU = np.inf
+            fallbackIdx = None
+
+            for k in range(start, end + 1):
+                j = (intersections[k] >> 16) & 0xFFFF
+                uVal = newTU[2 * k + 1]
+
+                # Cyclic distance
+                d = (j - this_i + ni) % ni
+
+                # Conditional self-pairing: allow only if current u < candidate u
+                if j == this_i and tVal >= uVal:
+                    continue
+
+                # New minimum distance found
+                if bestDist is None or d < bestDist:
+                    bestDist = d
+                    bestU = np.inf
+                    bestIdx = None
+                    fallbackU = np.inf
+                    fallbackIdx = None
+
+                if d == bestDist:
+                    # Prefer candidates with u >= tVal
+                    if uVal >= tVal and uVal < bestU:
+                        bestU = uVal
+                        bestIdx = k
+                    # Keep fallback for candidates violating TU
+                    if uVal < fallbackU:
+                        fallbackU = uVal
+                        fallbackIdx = k
+
+            # Choose the best candidate or fallback if none satisfy TU
+            players[i] = bestIdx if bestIdx is not None else fallbackIdx
+
         return players
 
     def getOverlapArea(self):
@@ -738,7 +696,7 @@ class model(lpcp.Model, *mixins.values()):
         positions = self.getPositions()
         sol = 0
         grad = np.zeros(numVertices * 2)
-        for m in range(numVertices):
+        for m in range(numVertices):                
             s = shapeId[m]
             n = nArray[s]
             for index in range(starts[s], ends[s]):
@@ -773,20 +731,23 @@ class model(lpcp.Model, *mixins.values()):
             exterior, exteriorForce = eef
         except TypeError:
             print("eef = ", eef)
-
-
         interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
+        if (lam == 0 and exterior + interior < 0):
+            raise Exception("negative energy found!")
         return exterior + interior, exteriorForce + interiorForce
     
-    def minimizeGDStep(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3):
+    def minimizeGDStep(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, addedForce = None):
         self.initializeNeighborCells()
         self.updateNeighborCells()
         self.updateNeighbors(0)
         overlapArea, force = self.functional(h = h, g12 = g12, lam = lam, pref = pref)
+        if (addedForce is not None):
+            force += addedForce
         force = self.getConstrainedForce(force)
         positions = self.getPositions()
         positions += dt * force
         self.setPositions(positions)
+        return overlapArea
 
     def getDf(self, vi, vzi, vj, vzj):
         dj = vzj - vj + 1.5
@@ -835,11 +796,15 @@ class model(lpcp.Model, *mixins.values()):
 
         return df
 
-    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100):
+    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100, addedForce = None, progress = 0):
+        freq = 0
+        if progress > 0:
+            freq = maxSteps // progress
         for step in range(maxSteps):
-            if (step % 100 == 0):
+            if freq > 0 and step % freq == 0:
                 print(step)
-            self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref)
+            if (self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref, addedForce = addedForce) == 0):
+                return 0
 
     def getConstraintMatrix(self):
         shapeId = self.getShapeId()
