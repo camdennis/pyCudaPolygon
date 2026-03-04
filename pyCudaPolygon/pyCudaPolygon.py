@@ -701,10 +701,10 @@ class model(lpcp.Model, *mixins.values()):
             startID2 = startIndices[(intersections[index] >> 48) & 0xFFFF]
             startID = np.min([startID1, startID2])
             startPoint = positions[2 * startID : 2 * startID + 2]
-            i = (intersections[index] >> 16) & 0xFFFF
-            j = (intersections[index]) & 0xFFFF
-            k = (outersections[index] >> 16) & 0xFFFF
-            l = (outersections[index]) & 0xFFFF
+            i = ((intersections[index] >> 16) & 0xFFFF) + startID1
+            j = ((intersections[index]) & 0xFFFF) + startID2
+            k = ((outersections[index] >> 16) & 0xFFFF) + startID2
+            l = ((outersections[index]) & 0xFFFF) + startID1
             zi = self.z(i)
             zj = self.z(j)
             zk = self.z(k)
@@ -792,8 +792,8 @@ class model(lpcp.Model, *mixins.values()):
                     end = mid
             index = start 
             while (index < numIntersections and intersections[index] & mask < ub):
-                i = (intersections[index] >> 16) & 0xFFFF
-                l = (outersections[index]) & 0xFFFF
+                i = ((intersections[index] >> 16) & 0xFFFF) + startIndices[s]
+                l = ((outersections[index]) & 0xFFFF) + startIndices[s]
                 sj = (intersections[index] >> 48) & 0xFFFF
                 startID = startIndices[s]
                 startPointID = min(startID, startIndices[sj])

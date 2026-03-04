@@ -21,7 +21,7 @@ extern "C" void updateContactsCUDA(const int* shapeId, const int* startIndices, 
 extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons);
 extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int pointDensity, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* positions, double& overlapArea);
 extern "C" int markValidAndCountsCUDA(int numVertices, int* contacts, int* numContacts, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx);
-extern "C" void writeCompactedCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
+extern "C" void writeCompactedCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
 extern "C" void markGroupBoundariesCUDA(const uint64_t* intersections, int numIntersections, int* groupStart, int* groupLength, int& numGroups);
 extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const float2* tu, const float2* ut, const int* startIndices, int numIntersections, uint64_t* outersections);
 extern "C" void sortKeysCUDA(uint64_t* d_keys, int numItems,int beginBit, int endBit, uint32_t* d_perm_out);
@@ -440,7 +440,7 @@ vector<int> Model::getShapeCounts() const {
 }
 
 void Model::writeCompacted() {
-    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, valid, outputIdx, intersections, numIntersections, tu);
+    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, startIndices, valid, outputIdx, intersections, numIntersections, tu);
 }
 
 void Model::sortKeys(int endBit) {
@@ -474,7 +474,7 @@ void Model::markGroupBoundaries() {
 
 void Model::updateOutersections() {
     numIntersections = markValidAndCountsCUDA(size, contacts, numContacts, maxNeighbors, inside, shapeId, numPolygons, valid, shapeCounts, outputIdx);
-    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, valid, outputIdx, intersections, numIntersections, tu);
+    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, startIndices, valid, outputIdx, intersections, numIntersections, tu);
     sortKeysCUDA(intersections, numIntersections, 0, 64, keys);
     applyPermutationCUDA_float2(tu, keys, tuTMP, numIntersections);
     updateOutersectionsCUDA(intersections, tuTMP, utTMP, startIndices, numIntersections, outersectionsTMP);

@@ -666,6 +666,7 @@ __global__ void writeCompactedKernel(
     const int* __restrict__ contacts,
     const bool* __restrict__ insideFlag,
     const int* __restrict__ shapeIds,
+    const int* __restrict__ startIndices,
     const int* __restrict__ valid,
     const uint64_t* __restrict__ outputIdx,
     uint64_t* __restrict__ intersections,
@@ -682,6 +683,8 @@ __global__ void writeCompactedKernel(
     int n2 = contacts[idx];
     int s1 = shapeIds[n1];
     int s2 = shapeIds[n2];
+    n1 -= startIndices[s1];
+    n2 -= startIndices[s2];
     bool inside = insideFlag[idx];
     float tVal = tu[idx].x;
     float uVal = tu[idx].y;
@@ -714,6 +717,7 @@ extern "C" void writeCompactedCUDA(
     int* contacts,
     bool* insideFlag,
     int* shapeIds,
+    int* startIndices,
     int* valid,
     uint64_t* outputIdx,
     uint64_t* intersections,
@@ -722,7 +726,7 @@ extern "C" void writeCompactedCUDA(
 ) {
     int numThreads = numVertices * maxNeighbors;
     int numBlocks = (numThreads + blockSize - 1) / blockSize;
-    writeCompactedKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, valid, outputIdx, intersections, tu);
+    writeCompactedKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, startIndices, valid, outputIdx, intersections, tu);
     cudaDeviceSynchronize();
 }
 
@@ -1085,7 +1089,7 @@ __global__ void updateOutersectionsKernel(
     uint64_t inter = intersections[idx];
     int sj = (inter >> 48) & 0xFFFF;
     int si = (inter >> 32) & 0xFFFF;
-    int i = (inter >> 16) & 0xFFFF;
+    int i = ((inter >> 16) & 0xFFFF) + startIndices[si];
 //    int j = inter & 0xFFFF;
     int ni = startIndices[si + 1] - startIndices[si];
     uint64_t sij = ((uint64_t)si << 48) | ((uint64_t)sj << 32);
