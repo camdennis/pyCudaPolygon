@@ -663,6 +663,22 @@ class model(lpcp.Model, *mixins.values()):
         s = int(np.sqrt(len(intersectionsCounter)))
         return intersectionsCounter.reshape(s, s)
 
+    def unpackIntersections(self):
+        intersections = self.getIntersections()
+        sj = (intersections >> 48) & 0xFFFF
+        si = (intersections >> 32) & 0xFFFF
+        i = (intersections >> 16) & 0xFFFF
+        j = (intersections) & 0xFFFF
+        return np.vstack((sj, si, i, j)).T
+
+    def unpackOutersections(self):
+        outersections = self.getOutersections()
+        sj = (outersections >> 48) & 0xFFFF
+        si = (outersections >> 32) & 0xFFFF
+        i = (outersections >> 16) & 0xFFFF
+        j = (outersections) & 0xFFFF
+        return np.vstack((sj, si, i, j)).T
+
     def functionalExterior(self, h, g12 = None, lam = 0, pref = 1):
         numVertices = self.getNumVertices()
         intersections = self.getIntersections()
@@ -674,47 +690,43 @@ class model(lpcp.Model, *mixins.values()):
         positions = self.getPositions()
         x = positions[::2]
         y = positions[1::2]
-        allF = np.zeros((2 * len(outersections), 2))
         sol = 0
         shapeId = self.getShapeId()
         nArray = self.getnArray()
-        allF = np.zeros((len(outersections) * 2, 2))
         startIndices = self.getStartIndices()
         grad = np.zeros(numVertices * 2)
         for index in range(len(outersections)):
-            # s(i), s(j), j, i
-            startID1 = startIndices[(intersections[index] >> 48) & 0xFFFF]
-            startID2 = startIndices[(intersections[index] >> 32) & 0xFFFF]
+            # s(j), s(i), i, j
+            startID1 = startIndices[(intersections[index] >> 32) & 0xFFFF]
+            startID2 = startIndices[(intersections[index] >> 48) & 0xFFFF]
             startID = np.min([startID1, startID2])
             startPoint = positions[2 * startID : 2 * startID + 2]
-            i = intersections[index] & 0xFFFF
-            j = (intersections[index] >> 16) & 0xFFFF
-            k = outersections[index] & 0xFFFF
-            l = (outersections[index] >> 16) & 0xFFFF
-            pi = positions[2 * i: 2 * i + 2]
+            i = (intersections[index] >> 16) & 0xFFFF
+            j = (intersections[index]) & 0xFFFF
+            k = (outersections[index] >> 16) & 0xFFFF
+            l = (outersections[index]) & 0xFFFF
             zi = self.z(i)
             zj = self.z(j)
-            pzi = positions[2 * zi: 2 * zi + 2]
-            pj = positions[2 * j: 2 * j + 2]
-            pzj = positions[2 * zj: 2 * zj + 2]
-            pk = positions[2 * k: 2 * k + 2]
             zk = self.z(k)
             zl = self.z(l)
+            pi = positions[2 * i: 2 * i + 2]
+            pj = positions[2 * j: 2 * j + 2]
+            pk = positions[2 * k: 2 * k + 2]
             pl = positions[2 * l: 2 * l + 2]
-            pzl = positions[2 * zl: 2 * zl + 2]
+            pzi = positions[2 * zi: 2 * zi + 2]
+            pzj = positions[2 * zj: 2 * zj + 2]
             pzk = positions[2 * zk: 2 * zk + 2]
+            pzl = positions[2 * zl: 2 * zl + 2]
             r1 = pzi - pi + 1.5
             r2 = pzk - pk + 1.5
             r1 %= 1
             r1 -= 0.5
             r2 %= 1
             r2 -= 0.5
-            t1 = newTU[2 * index]
+            t1 = newTU[2 * index + 1]
             fij = (pi + t1 * r1 + 1) % 1
             t2 = newUT[2 * index + 1]
             fkl = (pk + t2 * r2 + 1) % 1
-            allF[index * 2] = fij
-            allF[index * 2 + 1] = fkl
             if (i == l):
                 sol += h(fij, fkl, startPoint, lam, pref)
                 if (g12 is not None):
@@ -764,6 +776,7 @@ class model(lpcp.Model, *mixins.values()):
         positions = self.getPositions()
         sol = 0
         grad = np.zeros(numVertices * 2)
+        mask = (1 << 48) - 1
         for m in range(numVertices):                
             s = shapeId[m]
             n = nArray[s]
@@ -773,17 +786,19 @@ class model(lpcp.Model, *mixins.values()):
             ub = ((s + 1) << 32)
             while (end > start):
                 mid = (end + start) // 2
-                if ((intersections[mid] & ((1 << 48) - 1)) < lb): 
+                if (intersections[mid] & mask < lb): 
                     start = mid + 1
                 else:
                     end = mid
             index = start 
-            while (index < numIntersections and (intersections[index] & ((1 << 48) - 1)) < ub):
-                l = (intersections[index] >> 16) & 0xFFFF
-                i = (outersections[index]) & 0xFFFF
+            while (index < numIntersections and intersections[index] & mask < ub):
+                i = (intersections[index] >> 16) & 0xFFFF
+                l = (outersections[index]) & 0xFFFF
                 sj = (intersections[index] >> 48) & 0xFFFF
                 startID = startIndices[s]
                 startPointID = min(startID, startIndices[sj])
+                # The l + n - i works fine, but the mDist doesn't when m and i aren't
+                # in the same shape. 
                 mDist = (m + n - i) % n
                 lDist = (l + n - i) % n
                 if (mDist == 0 or mDist == lDist):
@@ -812,8 +827,10 @@ class model(lpcp.Model, *mixins.values()):
         except TypeError:
             print("eef = ", eef)
         interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
-#        if (lam == 0 and exterior + interior < 0):
-#            raise Exception("negative energy found!")
+#        return interior, interiorForce
+        if (lam == 0 and exterior + interior < 0):
+            raise Exception("negative energy found!")
+#        return interior, interiorForce
         return exterior + interior, exteriorForce + interiorForce
     
     def minimizeGDStep(self, h = None, g12 = None, a = 0, lam = 0, pref = 1, dt = 1e-3, addedForce = None):

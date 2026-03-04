@@ -298,10 +298,7 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
     int maxNeighbors,
     int boxSize,
     int* __restrict__ countPerBox,
-    double a,
-    bool* __restrict__ inside,
-    double* t,
-    double* u
+    double a
     ) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -407,14 +404,6 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId,
                 if (tt >= -a / rSize && tt <= 1.0 + a / rSize && uu >= -a / sSize && uu <= 1.0 + a / sSize) {
                     if (neighborCount < maxNeighbors) {
                         neighbors[id1 * maxNeighbors + neighborCount] = nid;
-                        t[id1 * maxNeighbors + neighborCount] = tt;
-                        u[id1 * maxNeighbors + neighborCount] = uu;
-                        if (denom > 0) {
-                            inside[id1 * maxNeighbors + neighborCount] = true;
-                        }
-                        else {
-                            inside[id1 * maxNeighbors + neighborCount] = false;
-                        }
                     }
                     neighborCount++;
                 }
@@ -433,10 +422,9 @@ __global__ void updateContactsKernel(
     const int* __restrict__ numNeighbors,
     const int maxNeighbors,
     bool* __restrict__ inside,
-    double* __restrict__ t,
-    double* __restrict__ u,
     int* __restrict__ contacts,
-    int* __restrict__ numContacts
+    int* __restrict__ numContacts,
+    float2* __restrict__ tu
     ) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -494,13 +482,15 @@ __global__ void updateContactsKernel(
 
         if (tt > 0.0 && tt < 1.0 && uu > 0.0 && uu < 1.0) {
             contacts[id1 * maxNeighbors + contactCount] = nid;
-            t[id1 * maxNeighbors + contactCount] = tt;
-            u[id1 * maxNeighbors + contactCount] = uu;
             if (denom > 0) {
                 inside[id1 * maxNeighbors + contactCount] = true;
+                tu[id1 * maxNeighbors + contactCount].x = tt;
+                tu[id1 * maxNeighbors + contactCount].y = uu;
             }
             else {
                 inside[id1 * maxNeighbors + contactCount] = false;
+                tu[id1 * maxNeighbors + contactCount].x = uu;
+                tu[id1 * maxNeighbors + contactCount].y = tt;
             }
             contactCount++;
         }
@@ -550,13 +540,10 @@ extern "C" int updateNeighborsCUDA(
     int boxSize,
     int* countPerBox,
     double a,
-    int* maxActualNeighbors,
-    bool* inside,
-    double* t,
-    double* u
+    int* maxActualNeighbors
 ) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a, inside, t, u);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
     cudaDeviceSynchronize();
 
     // initialize device accumulator for reduction
@@ -581,13 +568,12 @@ extern "C" void updateContactsCUDA(
     const int* numNeighbors, 
     const int maxNeighbors,
     bool* inside, 
-    double* t, 
-    double* u, 
+    float2* tu,
     int* contacts, 
     int* numContacts
 ) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateContactsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, size, neighbors, numNeighbors, maxNeighbors, inside, t, u, contacts, numContacts);
+    updateContactsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, size, neighbors, numNeighbors, maxNeighbors, inside, contacts, numContacts, tu);
     cudaDeviceSynchronize();
 }
 
@@ -635,7 +621,7 @@ extern "C" int markValidAndCountsCUDA(
     int numShapes,
     int* valid,
     int* shapeCounts,
-    int* outputIdx
+    uint64_t* outputIdx
 ) {
     int numThreads = numVertices * maxNeighbors;
     int numBlocks = (numThreads + blockSize - 1) / blockSize;
@@ -665,8 +651,8 @@ extern "C" int markValidAndCountsCUDA(
     
     int lastValid;
     cudaMemcpy(&lastValid, valid + numThreads - 1, sizeof(int), cudaMemcpyDeviceToHost);
-    int lastOutputIdx;
-    cudaMemcpy(&lastOutputIdx, outputIdx + numThreads - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    uint64_t lastOutputIdx;
+    cudaMemcpy(&lastOutputIdx, outputIdx + numThreads - 1, sizeof(uint64_t), cudaMemcpyDeviceToHost);
     
     // Cleanup
     cudaFree(d_temp_storage);
@@ -680,10 +666,8 @@ __global__ void writeCompactedKernel(
     const int* __restrict__ contacts,
     const bool* __restrict__ insideFlag,
     const int* __restrict__ shapeIds,
-    const double* __restrict__ t,
-    const double* __restrict__ u,
     const int* __restrict__ valid,
-    const int* __restrict__ outputIdx,
+    const uint64_t* __restrict__ outputIdx,
     uint64_t* __restrict__ intersections,
     float2* __restrict__ tu
 ) {
@@ -692,39 +676,36 @@ __global__ void writeCompactedKernel(
     if (idx >= totalContacts) return;
     if (!valid[idx]) return;
 
-    int outPos = outputIdx[idx];
+    uint64_t outPos = outputIdx[idx];
 
     int n1 = idx / maxNeighbors;
     int n2 = contacts[idx];
     int s1 = shapeIds[n1];
     int s2 = shapeIds[n2];
     bool inside = insideFlag[idx];
-    double tVal = t[idx];
-    double uVal = u[idx];
+    float tVal = tu[idx].x;
+    float uVal = tu[idx].y;
 
     // Pack 64-bit intersection exactly as Python's pack()
     uint64_t packed;
     if (inside) {
         // numbers = [s2, s1, n1, n2]
-        packed = ((uint64_t)(uint16_t)s2 << 48) |
-                 ((uint64_t)(uint16_t)s1 << 32) |
-                 ((uint64_t)(uint16_t)n1 << 16) |
-                 (uint64_t)(uint16_t)n2;
-    } else {
-        // numbers = [s1, s2, n2, n1]
         packed = ((uint64_t)(uint16_t)s1 << 48) |
                  ((uint64_t)(uint16_t)s2 << 32) |
                  ((uint64_t)(uint16_t)n2 << 16) |
                  (uint64_t)(uint16_t)n1;
+    } else {
+        // numbers = [s1, s2, n2, n1]
+        packed = ((uint64_t)(uint16_t)s2 << 48) |
+                 ((uint64_t)(uint16_t)s1 << 32) |
+                 ((uint64_t)(uint16_t)n1 << 16) |
+                 (uint64_t)(uint16_t)n2;
     }
     intersections[outPos] = packed;
 
     // Store TU as float2 in required order
-    if (inside) {
-        tu[outPos] = make_float2((float)uVal, (float)tVal); // u first, then t
-    } else {
-        tu[outPos] = make_float2((float)tVal, (float)uVal); // t first, then u
-    }
+    // TODO: Check if this is right
+    tu[outPos] = make_float2((float)tVal, (float)uVal);
 }
 
 extern "C" void writeCompactedCUDA(
@@ -733,17 +714,15 @@ extern "C" void writeCompactedCUDA(
     int* contacts,
     bool* insideFlag,
     int* shapeIds,
-    double* t,
-    double* u,
     int* valid,
-    int* outputIdx,
+    uint64_t* outputIdx,
     uint64_t* intersections,
     int numIntersections,
     float2* tu
 ) {
     int numThreads = numVertices * maxNeighbors;
     int numBlocks = (numThreads + blockSize - 1) / blockSize;
-    writeCompactedKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, t, u, valid, outputIdx, intersections, tu);
+    writeCompactedKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, valid, outputIdx, intersections, tu);
     cudaDeviceSynchronize();
 }
 
@@ -759,7 +738,7 @@ __global__ void gatherKernel_float2(const float2* input, const uint32_t* perm, f
     }
 }
 
-__global__ void gatherKernel_int(const int* input, const uint32_t* perm, int* output, int n) {
+__global__ void gatherKernel_int64(const uint64_t* input, const uint32_t* perm, uint64_t* output, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         output[idx] = input[perm[idx]];
@@ -773,10 +752,10 @@ extern "C" void applyPermutationCUDA_float2(const float2* d_input, const uint32_
     cudaDeviceSynchronize();
 }
 
-extern "C" void applyPermutationCUDA_int(const int* d_input, const uint32_t* d_perm, int* d_output, int numItems) {
+extern "C" void applyPermutationCUDA_int64(const uint64_t* d_input, const uint32_t* d_perm, uint64_t* d_output, int numItems) {
     int threads = 256;
     int blocks = (numItems + threads - 1) / threads;
-    gatherKernel_int<<<blocks, threads>>>(d_input, d_perm, d_output, numItems);
+    gatherKernel_int64<<<blocks, threads>>>(d_input, d_perm, d_output, numItems);
     cudaDeviceSynchronize();
 }
 
@@ -1098,18 +1077,18 @@ __global__ void updateOutersectionsKernel(
     float2* __restrict__ ut,
     const int* __restrict__ startIndices,
     int numIntersections,
-    int* __restrict__ outersections)
+    uint64_t* __restrict__ outersections)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numIntersections) return;
 
     uint64_t inter = intersections[idx];
-    int si = (inter >> 48) & 0xFFFF;
-    int sj = (inter >> 32) & 0xFFFF;
-//    int j = (inter >> 16) & 0xFFFF;
-    int i = inter & 0xFFFF;
+    int sj = (inter >> 48) & 0xFFFF;
+    int si = (inter >> 32) & 0xFFFF;
+    int i = (inter >> 16) & 0xFFFF;
+//    int j = inter & 0xFFFF;
     int ni = startIndices[si + 1] - startIndices[si];
-    uint64_t sij = ((uint64_t)sj << 48) | ((uint64_t)si << 32);
+    uint64_t sij = ((uint64_t)si << 48) | ((uint64_t)sj << 32);
         
     float tVal = tu[idx].x;
     // next we need to find idj
@@ -1121,7 +1100,7 @@ __global__ void updateOutersectionsKernel(
         if (intersections[mid] < sij) start = mid + 1;
         else end = mid;
     }
-    uint64_t ub = ((uint64_t)sj << 48) | ((uint64_t)(si + 1) << 32);
+    uint64_t ub = ((uint64_t)si << 48) | ((uint64_t)(sj + 1) << 32);
     
 
     int bestDist = -1;
@@ -1132,13 +1111,13 @@ __global__ void updateOutersectionsKernel(
     int k = start;
     while (k < numIntersections && intersections[k] < ub) {
         uint64_t kInter = intersections[k];
-        int j = (kInter >> 16) & 0xFFFF;
+        int l = kInter & 0xFFFF;
         float uVal = tu[k].y;
 
-        int d = (j - i + ni) % ni;
+        int d = (l - i + ni) % ni;
 
         // Skip self-pairing if condition fails
-        if (j == i && tVal >= uVal) {
+        if (l == i && tVal >= uVal) {
             continue;
         }
 
@@ -1177,7 +1156,7 @@ extern "C" void updateOutersectionsCUDA(
     float2* ut,
     int* startIndices,
     int numIntersections,
-    int* outersections)
+    uint64_t* outersections)
 {
     if (numIntersections <= 0) return;
     

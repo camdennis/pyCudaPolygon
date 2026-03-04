@@ -118,6 +118,9 @@ class Mixin():
             # Do a random translation
             pos[:, 0] += self.rng.random()
             pos[:, 1] += self.rng.random()
+            # wrap
+            pos += 2
+            pos %= 1
             positions[i * n: (i + 1) * n] = pos
             i += 1
 

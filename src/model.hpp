@@ -66,7 +66,7 @@ public:
     vector<int> getGroupStart() const;
     vector<int> getGroupLength() const;
     void updateOutersections();
-    vector<int> getOutersections() const;
+    vector<uint64_t> getOutersections() const;
 
 private:
     simControlStruct simControl;  // Instance of simControlStruct
@@ -98,14 +98,13 @@ private:
     double overlapArea = 0.0;
     // device buffer for per-sample intersection counts (added)
     int* intersectionsCounter;
-    double* t, *u;
     int* valid;
-    int* outputIdx;
+    uint64_t* outputIdx;
     int* shapeCounts;
     uint64_t* intersections;
     float2* tu, *tuTMP, *ut, *utTMP;
     int numIntersections = 0;
-    int* outersections, *outersectionsTMP;
+    uint64_t* outersections, *outersectionsTMP;
     int* groupStart;
     int* groupLength;
     uint32_t* keys;

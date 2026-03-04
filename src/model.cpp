@@ -16,16 +16,16 @@ extern "C" void initializeRandomStates(curandState *globalState, unsigned long l
 extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numPolygons);
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
 extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numPolygons);
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors, bool* inside, double* t, double* u);
-extern "C" void updateContactsCUDA(const int* shapeId, const int* startIndices, const double* positions, const int size, const int* neighbors, const int* numNeighbors, const int maxNeighbors, bool* inside, double* t, double* u, int* contacts, int* numContacts);
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, double a, int* maxActualNeighbors);
+extern "C" void updateContactsCUDA(const int* shapeId, const int* startIndices, const double* positions, const int size, const int* neighbors, const int* numNeighbors, const int maxNeighbors, bool* inside, float2* tu, int* contacts, int* numContacts);
 extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons);
 extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int pointDensity, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* positions, double& overlapArea);
-extern "C" int markValidAndCountsCUDA(int numVertices, int* contacts, int* numContacts, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, int* outputIdx);
-extern "C" void writeCompactedCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, double* t, double* u, int* valid, int* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
+extern "C" int markValidAndCountsCUDA(int numVertices, int* contacts, int* numContacts, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx);
+extern "C" void writeCompactedCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
 extern "C" void markGroupBoundariesCUDA(const uint64_t* intersections, int numIntersections, int* groupStart, int* groupLength, int& numGroups);
-extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const float2* tu, const float2* ut, const int* startIndices, int numIntersections, int* outersections);
+extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const float2* tu, const float2* ut, const int* startIndices, int numIntersections, uint64_t* outersections);
 extern "C" void sortKeysCUDA(uint64_t* d_keys, int numItems,int beginBit, int endBit, uint32_t* d_perm_out);
-extern "C" void applyPermutationCUDA_int(const int* d_input, const uint32_t* d_perm, int* d_output, int numItems);
+extern "C" void applyPermutationCUDA_int64(const uint64_t* d_input, const uint32_t* d_perm, uint64_t* d_output, int numItems);
 extern "C" void applyPermutationCUDA_float2(const float2* d_input, const uint32_t* d_perm, float2* d_output, int numItems);
 
 // Constructor
@@ -57,8 +57,6 @@ Model::~Model() {
     if (neighbors) cudaFree(neighbors);
     if (contacts) cudaFree(contacts);
     if (inside) cudaFree(inside);
-    if (t) cudaFree(t);
-    if (u) cudaFree(u);
     if (shapeId) cudaFree(shapeId);
     if (numNeighbors) cudaFree(numNeighbors);
     if (numContacts) cudaFree(numContacts);
@@ -111,9 +109,6 @@ void Model::initializeNeighborCells() {
     cudaMalloc((void**)&contacts, maxNeighbors * size * sizeof(int));
     cudaMalloc((void**)&inside, maxNeighbors * size * sizeof(bool));
 
-    cudaMalloc((void**)&t, maxNeighbors * size * sizeof(double));
-    cudaMalloc((void**)&u, maxNeighbors * size * sizeof(double));
-
     cudaMalloc((void**)&shapeId, size * sizeof(int));
     updateShapeIdCUDA(shapeId, startIndices, size, numPolygons);
 
@@ -121,7 +116,7 @@ void Model::initializeNeighborCells() {
     cudaMalloc((void**)&numContacts, size * sizeof(int));
     
     cudaMalloc((void**)&valid, maxNeighbors * size * sizeof(int));
-    cudaMalloc((void**)&outputIdx, maxNeighbors * size * sizeof(int));
+    cudaMalloc((void**)&outputIdx, maxNeighbors * size * sizeof(uint64_t));
     cudaMalloc((void**)&shapeCounts, numPolygons * sizeof(int));
 
     cudaMalloc((void**)&intersections, maxNeighbors * size * sizeof(uint64_t));
@@ -130,8 +125,8 @@ void Model::initializeNeighborCells() {
     cudaMalloc((void**)&tuTMP, maxNeighbors * size * sizeof(float2));
     cudaMalloc((void**)&utTMP, maxNeighbors * size * sizeof(float2));
         
-    cudaMalloc((void**)&outersections, maxNeighbors * size * sizeof(int));
-    cudaMalloc((void**)&outersectionsTMP, maxNeighbors * size * sizeof(int));
+    cudaMalloc((void**)&outersections, maxNeighbors * size * sizeof(uint64_t));
+    cudaMalloc((void**)&outersectionsTMP, maxNeighbors * size * sizeof(uint64_t));
     cudaMalloc((void**)&keys, maxNeighbors * size * sizeof(uint32_t));
     
     cudaMalloc((void**)&groupStart, maxNeighbors * size * sizeof(int));
@@ -149,7 +144,7 @@ void Model::updateNeighbors(double a) {
     // first attempt
     int newActualNeighbors = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                               neighborIndices, size, neighbors, numNeighbors,
-                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside, t, u);
+                              maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
     if (newActualNeighbors > maxNeighbors) {
         // read required max from device
         // warn the user
@@ -160,28 +155,34 @@ void Model::updateNeighbors(double a) {
         int newMax = max(maxNeighbors * 2 + 1, newActualNeighbors);
         cudaFree(neighbors);
         cudaFree(inside);
-        cudaFree(t);
-        cudaFree(u);
         cudaFree(valid);
         cudaFree(outputIdx);
         cudaFree(intersections);
         cudaFree(tu);
+        cudaFree(outersections);
+        cudaFree(ut);
+        cudaFree(tuTMP);
+        cudaFree(outersectionsTMP);
+        cudaFree(utTMP);
         cudaFree(contacts);
         cudaMalloc((void**)&neighbors, newMax * size * sizeof(int));
         cudaMalloc((void**)&inside, newMax * size * sizeof(bool));
-        cudaMalloc((void**)&t, newMax * size * sizeof(double));
-        cudaMalloc((void**)&u, newMax * size * sizeof(double));
         cudaMalloc((void**)&valid, newMax * size * sizeof(int));
-        cudaMalloc((void**)&outputIdx, newMax * size * sizeof(int));
+        cudaMalloc((void**)&outputIdx, newMax * size * sizeof(uint64_t));
         cudaMalloc((void**)&intersections, newMax * size * sizeof(uint64_t));
         cudaMalloc((void**)&tu, newMax * size * sizeof(float2));
+        cudaMalloc((void**)&outersections, newMax * size * sizeof(uint64_t));
+        cudaMalloc((void**)&ut, newMax * size * sizeof(float2));
+        cudaMalloc((void**)&tuTMP, newMax * size * sizeof(float2));
+        cudaMalloc((void**)&outersectionsTMP, newMax * size * sizeof(uint64_t));
+        cudaMalloc((void**)&utTMP, newMax * size * sizeof(float2));
         cudaMalloc((void**)&contacts, newMax * size * sizeof(int));
         maxNeighbors = newMax;
 
         // retry once
         int ok = updateNeighborsCUDA(shapeId, startIndices, positions, cellLocation,
                                       neighborIndices, size, neighbors, numNeighbors,
-                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors, inside, t, u);
+                                      maxNeighbors, boxSize, countPerBox, a, maxActualNeighbors);
         if (ok > maxNeighbors) {
             std::cerr << "Warning: updateNeighbors still failed after resizing to " << maxNeighbors << "\n";
         }
@@ -195,7 +196,7 @@ void Model::updateContacts() {
     // are in each
     // first attempt    
     updateContactsCUDA(shapeId, startIndices, positions, 
-        size, neighbors, numNeighbors, maxNeighbors, inside, t, u, contacts, numContacts);
+        size, neighbors, numNeighbors, maxNeighbors, inside, tu, contacts, numContacts);
 }
 
 void Model::markValidAndCounts() {
@@ -301,8 +302,8 @@ vector<double> Model::getTU() const {
     cudaMemcpy(tu_.data(), tu, numIntersections * sizeof(float2), cudaMemcpyDeviceToHost);
     vector<double> sol(2 * numIntersections);
     for (int i = 0; i < numIntersections; i++) {
-        sol[i] = static_cast<double>(tu_[i].x);
-        sol[i + numIntersections] = static_cast<double>(tu_[i].y);
+        sol[2 * i] = static_cast<double>(tu_[i].x);
+        sol[2 * i + 1] = static_cast<double>(tu_[i].y);
     }
     return sol;
 }
@@ -314,8 +315,8 @@ vector<double> Model::getUT() const {
     cudaMemcpy(ut_.data(), ut, numIntersections * sizeof(float2), cudaMemcpyDeviceToHost);
     vector<double> sol(2 * numIntersections);
     for (int i = 0; i < numIntersections; i++) {
-        sol[i] = static_cast<double>(ut_[i].x);
-        sol[i + numIntersections] = static_cast<double>(ut_[i].y);
+        sol[2 * i] = static_cast<double>(ut_[i].x);
+        sol[2 * i + 1] = static_cast<double>(ut_[i].y);
     }
     return sol;
 }
@@ -439,7 +440,7 @@ vector<int> Model::getShapeCounts() const {
 }
 
 void Model::writeCompacted() {
-    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, t, u, valid, outputIdx, intersections, numIntersections, tu);
+    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, valid, outputIdx, intersections, numIntersections, tu);
 }
 
 void Model::sortKeys(int endBit) {
@@ -473,20 +474,20 @@ void Model::markGroupBoundaries() {
 
 void Model::updateOutersections() {
     numIntersections = markValidAndCountsCUDA(size, contacts, numContacts, maxNeighbors, inside, shapeId, numPolygons, valid, shapeCounts, outputIdx);
-    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, t, u, valid, outputIdx, intersections, numIntersections, tu);
+    writeCompactedCUDA(size, maxNeighbors, contacts, inside, shapeId, valid, outputIdx, intersections, numIntersections, tu);
     sortKeysCUDA(intersections, numIntersections, 0, 64, keys);
     applyPermutationCUDA_float2(tu, keys, tuTMP, numIntersections);
     updateOutersectionsCUDA(intersections, tuTMP, utTMP, startIndices, numIntersections, outersectionsTMP);
     sortKeysCUDA(intersections, numIntersections, 0, 48, keys);
     applyPermutationCUDA_float2(tuTMP, keys, tu, numIntersections);
     applyPermutationCUDA_float2(utTMP, keys, ut, numIntersections);
-    applyPermutationCUDA_int(outersectionsTMP, keys, outersections, numIntersections);
+    applyPermutationCUDA_int64(outersectionsTMP, keys, outersections, numIntersections);
 }
 
-vector<int> Model::getOutersections() const {
-    vector<int> outersections_(numIntersections);
+vector<uint64_t> Model::getOutersections() const {
+    vector<uint64_t> outersections_(numIntersections);
     if (numIntersections > 0) {
-        cudaMemcpy(outersections_.data(), outersections, numIntersections * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(outersections_.data(), outersections, numIntersections * sizeof(uint64_t), cudaMemcpyDeviceToHost);
     }
     return outersections_;
 }
