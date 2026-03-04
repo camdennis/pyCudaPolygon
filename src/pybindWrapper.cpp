@@ -42,16 +42,31 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getNeighborCells", &Model::getNeighborCells)
         .def("getNeighborIndices", &Model::getNeighborIndices)
         .def("updateNeighbors", &Model::updateNeighbors)
+        .def("updateContacts", &Model::updateContacts)
+        .def("markValidAndCounts", &Model::markValidAndCounts)
+        .def("writeCompacted", &Model::writeCompacted)
+        .def("sortKeys", &Model::sortKeys)
+        .def("getKeys", &Model::getKeys)
+        .def("getIntersections", &Model::getIntersections)
+        .def("getNumIntersections", &Model::getNumIntersections)
+        .def("markGroupBoundaries", &Model::markGroupBoundaries)
+        .def("getGroupStart", &Model::getGroupStart)
+        .def("getGroupLength", &Model::getGroupLength)
+        .def("updateOutersections", &Model::updateOutersections)
+        .def("getOutersections", &Model::getOutersections)
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
+        .def("getContacts", &Model::getContacts)
+        .def("getNumContacts", &Model::getNumContacts)
         .def("getBoxCounts", &Model::getBoxCounts)
         .def("getInsideFlag", &Model::getInsideFlag)
         .def("getPerimeters", &Model::getPerimeters)
         .def("getForces", &Model::getForces)
         .def("getTU", &Model::getTU)
+        .def("getUT", &Model::getUT)
 
         // overlap area API
         .def("updateOverlapArea", &Model::updateOverlapArea)
         .def("getOverlapArea", &Model::getOverlapArea)
-        .def("getIntersectionsCounter", &Model::getIntersectionsCounter);
+        .def("getShapeCounts", &Model::getShapeCounts);
 }

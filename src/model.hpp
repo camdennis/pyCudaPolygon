@@ -14,6 +14,7 @@ using namespace std;
 class Model {
 public:
     Model(int size_);             // Constructor declaration
+    ~Model();                      // Destructor declaration
     void setNumVertices(int size);
     void setPositions(const vector<double>& positions_);
     int getNumVertices() const;
@@ -35,8 +36,11 @@ public:
     vector<int> getBoxCounts() const;
     vector<int> getNeighborIndices() const;
     void updateNeighbors(double a);
+    void updateContacts();
     vector<int> getNumNeighbors() const;
+    vector<int> getNumContacts() const;
     vector<int> getNeighbors() const;
+    vector<int> getContacts() const;
     double getMaxEdgeLength() const;
     string getModelEnum() const;
     vector<double> getForces() const;
@@ -50,6 +54,19 @@ public:
     void updateIntersectionsCounter();
     vector<int> getIntersectionsCounter() const;
     vector<double> getTU() const;
+    vector<double> getUT() const;
+    void markValidAndCounts();
+    vector<int> getShapeCounts() const;
+    void writeCompacted();
+    void sortKeys(int endBit);
+    vector<uint64_t> getIntersections() const;
+    vector<uint32_t> getKeys() const;
+    int getNumIntersections() const;
+    void markGroupBoundaries();
+    vector<int> getGroupStart() const;
+    vector<int> getGroupLength() const;
+    void updateOutersections();
+    vector<int> getOutersections() const;
 
 private:
     simControlStruct simControl;  // Instance of simControlStruct
@@ -65,10 +82,12 @@ private:
     int* cellLocation;
     int* shapeId;
     int* neighbors;
+    int* contacts;
     int boxesUsed;
     int maxNeighbors = 100;
     int boxSize;
     int* numNeighbors;
+    int* numContacts;
     bool updateMaxNeighbors = false;
     double maxEdgeLength;
     double* forces;
@@ -80,6 +99,16 @@ private:
     // device buffer for per-sample intersection counts (added)
     int* intersectionsCounter;
     double* t, *u;
+    int* valid;
+    int* outputIdx;
+    int* shapeCounts;
+    uint64_t* intersections;
+    float2* tu, *tuTMP, *ut, *utTMP;
+    int numIntersections = 0;
+    int* outersections, *outersectionsTMP;
+    int* groupStart;
+    int* groupLength;
+    uint32_t* keys;
 };
 
 #endif

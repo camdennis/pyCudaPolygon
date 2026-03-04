@@ -59,7 +59,9 @@ class Mixin():
                             color = arrowColor,
                             width = 0.003,
                             headwidth = 3,
-                            headlength = 4
+                            headlength = 4,
+                            zorder = 10
+
                         )
                         artists.append(quiver)
 

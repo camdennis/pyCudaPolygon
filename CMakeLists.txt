@@ -12,8 +12,21 @@ find_package(pybind11 REQUIRED)
 find_package(CUDA REQUIRED)
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -lineinfo")
 
-# Include directories for pybind11 and CUDA
-include_directories(${PYBIND11_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS})
+# Download CUB headers (header-only library)
+include(FetchContent)
+FetchContent_Declare(
+  cub
+  URL https://github.com/NVIDIA/cub/archive/refs/tags/2.1.0.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+# Just fetch, don't configure CUB's CMakeLists
+FetchContent_GetProperties(cub)
+if(NOT cub_POPULATED)
+  FetchContent_Populate(cub)
+endif()
+
+# Include directories for pybind11, CUDA, and CUB
+include_directories(${PYBIND11_INCLUDE_DIR} ${CUDA_INCLUDE_DIRS} ${cub_SOURCE_DIR}/cub)
 
 # Define the Python extension module
 pybind11_add_module(libpyCudaPolygon src/pybindWrapper.cpp src/model.cpp src/model.cu)

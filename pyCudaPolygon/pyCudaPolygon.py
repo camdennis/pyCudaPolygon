@@ -12,6 +12,8 @@ import shutil
 import glob
 import sys
 from collections import defaultdict
+from tqdm import tqdm
+
 # Load the `polygonMixins` package robustly so imports work whether this
 # module is loaded as a package or directly as a top-level module.
 try:
@@ -80,6 +82,15 @@ class model(lpcp.Model, *mixins.values()):
     def getPositions(self):
         return np.array(lpcp.Model.getPositions(self))
 
+    def markGroupBoundaries(self):
+        lpcp.Model.markGroupBoundaries(self)
+
+    def getGroupStart(self):
+        return np.array(lpcp.Model.getGroupStart(self))
+
+    def getGroupLength(self):
+        return np.array(lpcp.Model.getGroupLength(self))
+
     def getIntersectionsCounter(self):
         return np.array(lpcp.Model.getIntersectionsCounter(self))
 
@@ -100,6 +111,20 @@ class model(lpcp.Model, *mixins.values()):
             neigh[i] = allNeighbors
         return neigh
 
+    def getContacts(self):
+        v = self.getNumVertices()
+        contacts = np.array(lpcp.Model.getContacts(self))
+        maxNeighbors = len(contacts) // v
+        contacts = contacts.reshape(v, maxNeighbors)
+        cont = dict()
+        numContacts = self.getNumContacts()
+        for i, contact in enumerate(contacts):
+            allContacts = contact[:numContacts[i]]
+            if (len(allContacts) == 0):
+                continue
+            cont[i] = allContacts
+        return cont
+
     def getInsideFlag(self):
 #        v = self.getNumVertices()
         return np.array(lpcp.Model.getInsideFlag(self))
@@ -117,25 +142,37 @@ class model(lpcp.Model, *mixins.values()):
     def getTU(self):
 #        v = self.getNumVertices()
         return np.array(lpcp.Model.getTU(self))
-#        maxNeighbors = len(tu) // v // 2
-#        t = tu[:v * maxNeighbors].reshape(v, maxNeighbors)
-#        u = tu[v * maxNeighbors:].reshape(v, maxNeighbors)
-#        tDict = dict()
-#        uDict = dict()
-#        numNeighbors = self.getNumNeighbors()
-#        for i in range(len(t)):
-#            allEl = t[i][:numNeighbors[i]]
-#            if (len(allEl) == 0):
-#                continue
-#           tDict[i] = allEl
-#           allEl = u[i][:numNeighbors[i]]
-#           if (len(allEl) == 0):
-#               continue
-#            uDict[i] = allEl
-#        return tDict, uDict
 
-    def updateNeighbors(self, a):
+    def getUT(self):
+#        v = self.getNumVertices()
+        return np.array(lpcp.Model.getUT(self))
+
+    def updateNeighbors(self, a = 0):
         lpcp.Model.updateNeighbors(self, a)
+
+    def updateContacts(self):
+        lpcp.Model.updateContacts(self)
+
+    def markValidAndCounts(self):
+        return lpcp.Model.markValidAndCounts(self)
+
+    def writeCompacted(self):
+        lpcp.Model.writeCompacted(self)
+
+    def sortKeys(self, endBit):
+        lpcp.Model.sortKeys(self, endBit)
+
+    def getIntersections(self):
+        return np.array(lpcp.Model.getIntersections(self))
+
+    def getKeys(self):
+        return np.array(lpcp.Model.getKeys(self))
+
+    def getOutersections(self):
+        return np.array(lpcp.Model.getOutersections(self))
+
+    def getNumIntersections(self):
+        return lpcp.Model.getNumIntersections(self)
 
     def updateOverlapArea(self, pointDensity):
         # This is MC
@@ -171,6 +208,33 @@ class model(lpcp.Model, *mixins.values()):
     def getAreas(self):
         # This is MC for now
         return np.array(lpcp.Model.getAreas(self))
+
+    def getEdgeLengths(self):
+        # TODO: do this with CUDA
+        numPolygons = self.getNumPolygons()
+        numVertices = self.getNumVertices()
+        positions = self.getPositions()
+        nArray = self.getnArray()
+        startIndices = np.cumsum(np.concatenate(([0], nArray)))
+        endIndices = np.roll(startIndices, -1)
+        endIndices[-1] = numVertices
+        sol = []
+        for i in range(numPolygons):
+            startIndex = startIndices[i]
+            endIndex = endIndices[i]
+            for j in range(startIndex, endIndex - 1):
+                nextj = j + 1
+                deltaVec = positions[j * 2 : (j + 1) * 2] - positions[nextj * 2 : (nextj + 1) * 2] + 1.5
+                deltaVec %= 1
+                deltaVec -= 0.5
+                delta2 = (deltaVec)**2
+                delta = np.sqrt(np.sum(delta2))
+                sol.append(delta)
+            nextj = endIndex - 1
+            delta2 = (positions[nextj * 2 : nextj * 2 + 2] - positions[startIndex * 2 : (startIndex + 1) * 2])**2
+            delta = np.sqrt(np.sum(delta2))
+            sol.append(delta)
+        return np.array(sol)
 
     def getAreaOfPos(self, pos):
         # This is pythonic for now
@@ -365,9 +429,7 @@ class model(lpcp.Model, *mixins.values()):
         self.setPositions(positions.reshape(self.getNumVertices() * 2))
         self.updateAreas()
         areas = self.getAreas()
-#        if (np.sum(abs(areas - targetAreas)) >= 1e-9):
-#            raise Exception("One of the areas was not set correctly. This may be due to the area of the original shape being too small for the boundary conditions")
-        
+
     def setMonoArea(self, phi = 1):
         # This overrides phi!
         targetArea = phi / self.getNumPolygons()
@@ -446,7 +508,7 @@ class model(lpcp.Model, *mixins.values()):
             return startIndices[shapeId + 1] - 1
         return i - 1
 
-    def getIntersections(self):
+    def getIntersectionsPY(self):
         def pack(numbers):
             result = (numbers[3] & 0xFFFF) | \
                     ((numbers[2] & 0xFFFF) << 16) | \
@@ -468,13 +530,10 @@ class model(lpcp.Model, *mixins.values()):
             b = (val >> 32) & 0xFFFF
             return (a & 0xFFFF) | ((b & 0xFFFF) << 16)
         
-        # Here we just update the neighbors. In practice I would like to implement
-        # Something to check the neighbors for intersection and then save that
-        self.updateNeighbors(0.0)
         numVertices = self.getNumVertices()
-        neighbors = np.array(lpcp.Model.getNeighbors(self))
-        maxNeighbors = len(neighbors) // numVertices
-        numNeighbors = self.getNumNeighbors()
+        contacts = np.array(lpcp.Model.getContacts(self))
+        maxNeighbors = len(contacts) // numVertices
+        numContacts = self.getNumContacts()
         insideFlag = self.getInsideFlag()
         shapeIds = self.getShapeId()
         numShapes = self.getNumPolygons()
@@ -483,9 +542,9 @@ class model(lpcp.Model, *mixins.values()):
         newTU = []
         numEach = np.zeros(numShapes, dtype = int)
         for n1 in range(numVertices):
-            for i in range(numNeighbors[n1]):
+            for i in range(numContacts[n1]):
                 s1 = shapeIds[n1]
-                n2 = neighbors[n1 * maxNeighbors + i]
+                n2 = contacts[n1 * maxNeighbors + i]
                 s2 = shapeIds[n2]
                 tVal = t[n1 * maxNeighbors + i]
                 uVal = u[n1 * maxNeighbors + i]
@@ -531,11 +590,17 @@ class model(lpcp.Model, *mixins.values()):
         bizarroEnds[bizarroIntersection] = len(intersections) - 1
         return intersections, newTU, starts, ends, bizarroStarts, bizarroEnds
     
-    def getPlayers(self):
-        intersections, newTU, _, _, starts, ends = self.getIntersections()
+    def getPlayersPY(self):
+        intersections = self.getIntersections()
+        self.markGroupBoundaries()
+        starts = self.getGroupStart()
+        ends = starts + self.getGroupLength() - 1
         n = self.getnArray()
         numIntersections = len(intersections)
         players = np.empty(numIntersections, dtype=int)
+        newTU = self.getTU()
+        newTU = np.array(newTU).reshape(numIntersections, 2).T.reshape(2 * numIntersections)
+
 
         for i in range(numIntersections):
             this_i = intersections[i] & 0xFFFF
@@ -543,9 +608,8 @@ class model(lpcp.Model, *mixins.values()):
             ni = n[vertex]
 
             # Slice of neighbors
-            intersectionId = ((intersections[i] >> 32) & 0xFFFF) | (((intersections[i] >> 48) & 0xFFFF) << 16)
-            start = starts[intersectionId]
-            end = ends[intersectionId]
+            start = starts[i]
+            end = ends[i]
 
             tVal = newTU[2 * i]
 
@@ -554,7 +618,6 @@ class model(lpcp.Model, *mixins.values()):
             bestIdx = None
             fallbackU = np.inf
             fallbackIdx = None
-
             for k in range(start, end + 1):
                 j = (intersections[k] >> 16) & 0xFFFF
                 uVal = newTU[2 * k + 1]
@@ -592,6 +655,9 @@ class model(lpcp.Model, *mixins.values()):
     def getOverlapArea(self):
         return np.array(lpcp.Model.getOverlapArea(self))
 
+    def getShapeCounts(self):
+        return np.array(lpcp.Model.getShapeCounts(self))
+
     def getIntersectionsCounter(self):
         intersectionsCounter = np.array(lpcp.Model.getIntersectionsCounter(self))
         s = int(np.sqrt(len(intersectionsCounter)))
@@ -599,21 +665,23 @@ class model(lpcp.Model, *mixins.values()):
 
     def functionalExterior(self, h, g12 = None, lam = 0, pref = 1):
         numVertices = self.getNumVertices()
-        intersections, newTU, _, _, starts, ends = self.getIntersections()
+        intersections = self.getIntersections()
+        newTU = self.getTU()
+        newUT = self.getUT()
         if (len(intersections) == 0):
             return 0, np.zeros(numVertices * 2)
-        players = self.getPlayers()
+        outersections = self.getOutersections()
         positions = self.getPositions()
         x = positions[::2]
         y = positions[1::2]
-        allF = np.zeros((2 * len(players), 2))
+        allF = np.zeros((2 * len(outersections), 2))
         sol = 0
         shapeId = self.getShapeId()
         nArray = self.getnArray()
-        allF = np.zeros((len(players) * 2, 2))
+        allF = np.zeros((len(outersections) * 2, 2))
         startIndices = self.getStartIndices()
         grad = np.zeros(numVertices * 2)
-        for index in range(len(players)):
+        for index in range(len(outersections)):
             # s(i), s(j), j, i
             startID1 = startIndices[(intersections[index] >> 48) & 0xFFFF]
             startID2 = startIndices[(intersections[index] >> 32) & 0xFFFF]
@@ -621,8 +689,8 @@ class model(lpcp.Model, *mixins.values()):
             startPoint = positions[2 * startID : 2 * startID + 2]
             i = intersections[index] & 0xFFFF
             j = (intersections[index] >> 16) & 0xFFFF
-            k = intersections[players[index]] & 0xFFFF
-            l = (intersections[players[index]] >> 16) & 0xFFFF
+            k = outersections[index] & 0xFFFF
+            l = (outersections[index] >> 16) & 0xFFFF
             pi = positions[2 * i: 2 * i + 2]
             zi = self.z(i)
             zj = self.z(j)
@@ -643,7 +711,7 @@ class model(lpcp.Model, *mixins.values()):
             r2 -= 0.5
             t1 = newTU[2 * index]
             fij = (pi + t1 * r1 + 1) % 1
-            t2 = newTU[2 * players[index]]
+            t2 = newUT[2 * index + 1]
             fkl = (pk + t2 * r2 + 1) % 1
             allF[index * 2] = fij
             allF[index * 2 + 1] = fkl
@@ -686,11 +754,11 @@ class model(lpcp.Model, *mixins.values()):
         return sol, -grad
 
     def functionalInterior(self, h, g12 = None, lam = 0, pref = 1):
-        self.updateNeighbors(0.0)
         numVertices = self.getNumVertices()
-        players = self.getPlayers()
+        outersections = self.getOutersections()
         shapeId = self.getShapeId()
-        intersections, newTU, starts, ends, _, _ = self.getIntersections()
+        intersections = self.getIntersections()
+        numIntersections = len(intersections)
         nArray = self.getnArray()
         startIndices = self.getStartIndices()
         positions = self.getPositions()
@@ -699,18 +767,29 @@ class model(lpcp.Model, *mixins.values()):
         for m in range(numVertices):                
             s = shapeId[m]
             n = nArray[s]
-            for index in range(starts[s], ends[s]):
-                i = intersections[index] & 0xFFFF
-                l = (intersections[players[index]] >> 16) & 0xFFFF
-                sj = (intersections[index] >> 32) & 0xFFFF
-                si = (intersections[index] >> 48) & 0xFFFF
-                startID = startIndices[si]
+            start = 0
+            end = numIntersections
+            lb = (s << 32)
+            ub = ((s + 1) << 32)
+            while (end > start):
+                mid = (end + start) // 2
+                if ((intersections[mid] & ((1 << 48) - 1)) < lb): 
+                    start = mid + 1
+                else:
+                    end = mid
+            index = start 
+            while (index < numIntersections and (intersections[index] & ((1 << 48) - 1)) < ub):
+                l = (intersections[index] >> 16) & 0xFFFF
+                i = (outersections[index]) & 0xFFFF
+                sj = (intersections[index] >> 48) & 0xFFFF
+                startID = startIndices[s]
                 startPointID = min(startID, startIndices[sj])
-                mf = (m + n - i - 2 * startID) % n + i - startID
-                lf = (l + n - i - 2 * startID) % n + i - startID
-                if (mf == i - startID or mf == lf):
+                mDist = (m + n - i) % n
+                lDist = (l + n - i) % n
+                if (mDist == 0 or mDist == lDist):
+                    index += 1
                     continue
-                if (mf < lf):
+                if (mDist < lDist):
                     # This intersection does matter
                     startPoint = positions[2 * startPointID : 2 * startPointID + 2]
                     nextIndex = self.z(m)
@@ -723,6 +802,7 @@ class model(lpcp.Model, *mixins.values()):
                         grad[m * 2 + 1] += g1[1]
                         grad[nextIndex * 2] += g2[0]
                         grad[nextIndex * 2 + 1] += g2[1]
+                index += 1
         return sol, -grad
 
     def functional(self, h, g12 = None, lam = 0, pref = 1):
@@ -732,15 +812,20 @@ class model(lpcp.Model, *mixins.values()):
         except TypeError:
             print("eef = ", eef)
         interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
-        if (lam == 0 and exterior + interior < 0):
-            raise Exception("negative energy found!")
+#        if (lam == 0 and exterior + interior < 0):
+#            raise Exception("negative energy found!")
         return exterior + interior, exteriorForce + interiorForce
     
-    def minimizeGDStep(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, addedForce = None):
+    def minimizeGDStep(self, h = None, g12 = None, a = 0, lam = 0, pref = 1, dt = 1e-3, addedForce = None):
         self.initializeNeighborCells()
         self.updateNeighborCells()
-        self.updateNeighbors(0)
-        overlapArea, force = self.functional(h = h, g12 = g12, lam = lam, pref = pref)
+        self.updateNeighbors(a)
+        self.updateContacts()
+        self.updateOutersections()
+        try:
+            overlapArea, force = self.functional(h = h, g12 = g12, lam = lam, pref = pref)
+        except:
+            raise Exception("Something went wrong with the functional")
         if (addedForce is not None):
             force += addedForce
         force = self.getConstrainedForce(force)
@@ -796,15 +881,17 @@ class model(lpcp.Model, *mixins.values()):
 
         return df
 
-    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100, addedForce = None, progress = 0):
-        freq = 0
-        if progress > 0:
-            freq = maxSteps // progress
-        for step in range(maxSteps):
-            if freq > 0 and step % freq == 0:
-                print(step)
-            if (self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref, addedForce = addedForce) == 0):
-                return 0
+    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1):
+        with tqdm(total = maxSteps, desc="Processing", disable=(not progressBar)) as pbar:
+            for step in range(maxSteps):
+                if checkpointDir is not None and (step % checkpointFreq == 0):
+                    if not os.path.isdir(checkpointDir):
+                        os.makedirs(checkpointDir)
+                    self.saveModel(checkpointDir + "/" + str(step))
+                if progressBar:
+                    pbar.update(1)
+                if (self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref, addedForce = addedForce, dt = dt) == 0):
+                    return 0
 
     def getConstraintMatrix(self):
         shapeId = self.getShapeId()
