@@ -278,3 +278,15 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const flo
     cudaDeviceSynchronize();
 }
 
+extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy) {
+    cudaMemset(force, 0, sizeof(double));   // size must be known – careful
+    if (numIntersections <= 0) {
+        cudaMemset(force, 0, 2 * numVertices * sizeof(double));   // size must be known – careful
+        return;
+    }
+    int threads = 256;
+    int blocks = (numIntersections + threads - 1) / threads;
+    size_t smem = threads * sizeof(double);
+    updateForceEnergyExteriorKernel<<<blocks, threads, smem>>>(numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
+    cudaDeviceSynchronize();
+}

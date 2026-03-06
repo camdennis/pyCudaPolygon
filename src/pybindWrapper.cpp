@@ -15,10 +15,11 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .value("abnormal", simControlStruct::modelEnum::abnormal);
 
     py::class_<Model>(m, "Model")
-    
+
         // initializers
 
         .def(py::init<int>())
+        .def("initializeNeighborCells", &Model::initializeNeighborCells)
 
         // helpers
 
@@ -37,7 +38,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         .def("updateAreas", &Model::updateAreas)
         .def("updatePerimeters", &Model::updatePerimeters)
-        .def("initializeNeighborCells", &Model::initializeNeighborCells)
         .def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("updateContacts", &Model::updateContacts)
@@ -45,6 +45,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
         .def("updateOutersections", &Model::updateOutersections)
         .def("updateOverlapArea", &Model::updateOverlapArea)
+        .def("updateForceEnergy", &Model::updateForceEnergy)
 
         // getters
 
@@ -73,5 +74,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getTU", &Model::getTU)
         .def("getUT", &Model::getUT)
         .def("getOverlapArea", &Model::getOverlapArea)
-        .def("getShapeCounts", &Model::getShapeCounts);
+        .def("getShapeCounts", &Model::getShapeCounts)
+        .def("getForces", &Model::getForces)
+        .def("getEnergy", &Model::getEnergy);
 }

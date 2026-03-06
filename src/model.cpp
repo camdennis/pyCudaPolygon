@@ -30,11 +30,13 @@ extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int point
 extern "C" int updateValidAndCountsCUDA(int numVertices, int* contacts, int* numContacts, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx);
 extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
 extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const float2* tu, const float2* ut, const int* startIndices, int numIntersections, uint64_t* outersections);
+extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy);
 
 // Constructor
+
 Model::Model(int size_)
     : size(size_),
-      positions(nullptr), forces(nullptr), maxActualNeighbors(nullptr), globalState(nullptr),
+      positions(nullptr), force(nullptr), maxActualNeighbors(nullptr), globalState(nullptr),
       countPerBox(nullptr), boxId(nullptr), neighborIndices(nullptr), cellLocation(nullptr),
       shapeId(nullptr), neighbors(nullptr), contacts(nullptr), numNeighbors(nullptr),
       numContacts(nullptr), inside(nullptr), perimeters(nullptr), intersectionsCounter(nullptr),
@@ -45,7 +47,8 @@ Model::Model(int size_)
 {
     cudaFree(0);
     cudaMalloc((void**)&positions, 2 * size * sizeof(double));
-    cudaMalloc((void**)&forces, size * 2 * sizeof(double));
+    cudaMalloc((void**)&force, size * 2 * sizeof(double));
+    cudaMalloc((void**)&energy, sizeof(double));
 
     cudaMalloc(&maxActualNeighbors, sizeof(int));
     int init = INT_MIN;
@@ -57,7 +60,8 @@ Model::Model(int size_)
 
 Model::~Model() {
     if (positions) cudaFree(positions);
-    if (forces) cudaFree(forces);
+    if (force) cudaFree(force);
+    if (energy) cudaFree(energy);
     if (maxActualNeighbors) cudaFree(maxActualNeighbors);
     if (globalState) cudaFree(globalState);    
     // From initializeNeighborCells
@@ -261,6 +265,16 @@ void Model::updateOutersections() {
     applyPermutationCUDA_int64(outersectionsTMP, keys, outersections, numIntersections);
 }
 
+void Model::updateForceEnergy() {
+    if (numIntersections == 0) {
+        cudaMemset(force, 0, size * 2 * sizeof(double));
+        cudaMemset(energy, 0, sizeof(double));
+        return;
+    }
+
+    updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
+}
+
 // setters
 
 void Model::setMaxEdgeLength(double maxEdgeLength_) {
@@ -310,6 +324,12 @@ unsigned long long Model::getRandomSeed() {
     return seed;
 }
 
+double Model::getEnergy() const {
+    double energy_ = 0.0;
+    cudaMemcpy(&energy_, energy, sizeof(double), cudaMemcpyDeviceToHost);
+    return energy_;
+}
+
 vector<int> Model::getShapeId() const {
     vector<int> shapeId_(size);
     cudaMemcpy(shapeId_.data(), shapeId, size * sizeof(int), cudaMemcpyDeviceToHost);
@@ -320,6 +340,12 @@ vector<double> Model::getPositions() const {
     vector<double> positions_(2 * size);
     cudaMemcpy(positions_.data(), positions, 2 * size * sizeof(double), cudaMemcpyDeviceToHost);
     return positions_;
+}
+
+vector<double> Model::getForces() const {
+    vector<double> force_(2 * size);
+    cudaMemcpy(force_.data(), force, 2 * size * sizeof(double), cudaMemcpyDeviceToHost);
+    return force_;
 }
 
 vector<int> Model::getIntersectionsCounter() const {
@@ -431,12 +457,6 @@ vector<int> Model::getBoxCounts() const {
     vector<int> countPerBox_(boxSize * boxSize);
     cudaMemcpy(countPerBox_.data(), countPerBox, boxSize * boxSize * sizeof(int), cudaMemcpyDeviceToHost);
     return countPerBox_;
-}
-
-vector<double> Model::getForces() const {
-    vector<double> forces_(size * 2);
-    cudaMemcpy(forces_.data(), forces, size * 2 * sizeof(double), cudaMemcpyDeviceToHost);
-    return forces_;
 }
 
 void Model::updateOverlapArea(int pointDensity_) {

@@ -68,6 +68,7 @@ public:
     vector<uint64_t> getOutersections() const;
     unsigned long long getRandomSeed();
     vector<double> getAreas() const;
+    double getEnergy() const;
 
     // updaters
 
@@ -81,12 +82,14 @@ public:
     void updateValidAndCounts();
     void updateOutersections();
     void updateCompactedIntersections();
+    void updateForceEnergy();
 
 private:
     simControlStruct simControl;
     int size, numPolygons;
     unsigned long long seed;
     curandState* globalState;
+    double* energy;
     double* positions;
     int* startIndices;
     double* areas;
@@ -104,7 +107,7 @@ private:
     int* numContacts;
     bool updateMaxNeighbors = false;
     double maxEdgeLength;
-    double* forces;
+    double* force;
     int* maxActualNeighbors;
     bool* inside;
     double* perimeters;

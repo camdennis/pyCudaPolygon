@@ -248,6 +248,9 @@ class model(lpcp.Model, *mixins.values()):
     def getnArray(self):
         return np.diff(self.getStartIndices())
 
+    def getEnergy(self):
+        return lpcp.Model.getEnergy(self)
+
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
 
@@ -442,6 +445,9 @@ class model(lpcp.Model, *mixins.values()):
     def updateNeighborCells(self):
         lpcp.Model.updateNeighborCells(self)
         
+    def updateForceEnergy(self):
+        lpcp.Model.updateForceEnergy(self)
+
     # helpers
 
     def z(self, i):
@@ -659,6 +665,7 @@ class model(lpcp.Model, *mixins.values()):
             exterior, exteriorForce = eef
         except TypeError:
             print("eef = ", eef)
+        return exterior, exteriorForce
         interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
         #return interior, interiorForce
         if (lam == 0 and exterior + interior < 0):
