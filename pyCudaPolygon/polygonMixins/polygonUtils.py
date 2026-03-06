@@ -123,5 +123,6 @@ class Mixin():
             pos %= 1
             positions[i * n: (i + 1) * n] = pos
             i += 1
-
+        positions += 1
+        positions %= 1
         self.setPositions(positions.reshape(numVertices * 2))

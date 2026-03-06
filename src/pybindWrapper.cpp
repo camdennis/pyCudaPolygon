@@ -15,21 +15,39 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .value("abnormal", simControlStruct::modelEnum::abnormal);
 
     py::class_<Model>(m, "Model")
+    
+        // initializers
+
         .def(py::init<int>())
 
-        // Setters
+        // helpers
+
+        .def("sortKeys", &Model::sortKeys)
+        .def("getKeys", &Model::getKeys)
+
+        // setters        
+
         .def("setNumVertices", &Model::setNumVertices)
         .def("setPositions", &Model::setPositions)
         .def("setModelEnum", &Model::setModelEnum)
         .def("setStartIndices", &Model::setStartIndices)
         .def("setMaxEdgeLength", &Model::setMaxEdgeLength)
 
+        // updaters
+
         .def("updateAreas", &Model::updateAreas)
         .def("updatePerimeters", &Model::updatePerimeters)
         .def("initializeNeighborCells", &Model::initializeNeighborCells)
         .def("updateNeighborCells", &Model::updateNeighborCells)
+        .def("updateNeighbors", &Model::updateNeighbors)
+        .def("updateContacts", &Model::updateContacts)
+        .def("updateValidAndCounts", &Model::updateValidAndCounts)
+        .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
+        .def("updateOutersections", &Model::updateOutersections)
+        .def("updateOverlapArea", &Model::updateOverlapArea)
 
-        // Getters
+        // getters
+
         .def("getNumVertices", &Model::getNumVertices)
         .def("getNumPolygons", &Model::getNumPolygons)
         .def("getShapeId", &Model::getShapeId)
@@ -41,18 +59,8 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getAreas", &Model::getAreas)
         .def("getNeighborCells", &Model::getNeighborCells)
         .def("getNeighborIndices", &Model::getNeighborIndices)
-        .def("updateNeighbors", &Model::updateNeighbors)
-        .def("updateContacts", &Model::updateContacts)
-        .def("markValidAndCounts", &Model::markValidAndCounts)
-        .def("writeCompacted", &Model::writeCompacted)
-        .def("sortKeys", &Model::sortKeys)
-        .def("getKeys", &Model::getKeys)
         .def("getIntersections", &Model::getIntersections)
         .def("getNumIntersections", &Model::getNumIntersections)
-        .def("markGroupBoundaries", &Model::markGroupBoundaries)
-        .def("getGroupStart", &Model::getGroupStart)
-        .def("getGroupLength", &Model::getGroupLength)
-        .def("updateOutersections", &Model::updateOutersections)
         .def("getOutersections", &Model::getOutersections)
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
@@ -64,9 +72,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getForces", &Model::getForces)
         .def("getTU", &Model::getTU)
         .def("getUT", &Model::getUT)
-
-        // overlap area API
-        .def("updateOverlapArea", &Model::updateOverlapArea)
         .def("getOverlapArea", &Model::getOverlapArea)
         .def("getShapeCounts", &Model::getShapeCounts);
 }

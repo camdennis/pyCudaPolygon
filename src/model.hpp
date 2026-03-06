@@ -13,30 +13,40 @@ using namespace std;
 
 class Model {
 public:
-    Model(int size_);             // Constructor declaration
-    ~Model();                      // Destructor declaration
+    Model(int size_);
+    ~Model();
+
+    // initializers
+
+    void initializeNeighborCells();
+    void initializeRandomSeed(const unsigned long long seed_);
+
+    // deallocators
+
+    void deallocateAll();
+
+    // helpers
+
+    void sortKeys(int endBit);
+
+    // setters
+
     void setNumVertices(int size);
     void setPositions(const vector<double>& positions_);
+    void setStartIndices(const vector<int>& startIndices_);
+    void setModelEnum(simControlStruct::modelEnum modelType_);
+    void setMaxEdgeLength(double maxEdgeLength);
+
+    // getters
+
     int getNumVertices() const;
     int getNumPolygons() const;
     vector<int> getShapeId() const;
     vector<double> getPositions() const;
-    void setStartIndices(const vector<int>& startIndices_);
     vector<int> getStartIndices() const;
-    void setModelEnum(simControlStruct::modelEnum modelType_);
-    void deallocateAll();
-    void initializeRandomSeed(const unsigned long long seed_);
-    unsigned long long getRandomSeed();
-    void updateAreas();
-    void setMaxEdgeLength(double maxEdgeLength);
-    vector<double> getAreas() const;
-    void updateNeighborCells();
-    void initializeNeighborCells();
     vector<int> getNeighborCells() const;
     vector<int> getBoxCounts() const;
     vector<int> getNeighborIndices() const;
-    void updateNeighbors(double a);
-    void updateContacts();
     vector<int> getNumNeighbors() const;
     vector<int> getNumContacts() const;
     vector<int> getNeighbors() const;
@@ -46,37 +56,41 @@ public:
     vector<double> getForces() const;
     void resetMaxActualNeighbors();
     vector<bool> getInsideFlag() const;
-    void updatePerimeters();
     vector<double> getPerimeters() const;
-
-    void updateOverlapArea(int pointDensity_);
     double getOverlapArea() const;
-    void updateIntersectionsCounter();
     vector<int> getIntersectionsCounter() const;
     vector<double> getTU() const;
     vector<double> getUT() const;
-    void markValidAndCounts();
     vector<int> getShapeCounts() const;
-    void writeCompacted();
-    void sortKeys(int endBit);
     vector<uint64_t> getIntersections() const;
     vector<uint32_t> getKeys() const;
     int getNumIntersections() const;
-    void markGroupBoundaries();
-    vector<int> getGroupStart() const;
-    vector<int> getGroupLength() const;
-    void updateOutersections();
     vector<uint64_t> getOutersections() const;
+    unsigned long long getRandomSeed();
+    vector<double> getAreas() const;
+
+    // updaters
+
+    void updateAreas();
+    void updateNeighborCells();
+    void updateNeighbors(double a);
+    void updateContacts();
+    void updatePerimeters();
+    void updateOverlapArea(int pointDensity_);
+    void updateIntersectionsCounter();
+    void updateValidAndCounts();
+    void updateOutersections();
+    void updateCompactedIntersections();
 
 private:
-    simControlStruct simControl;  // Instance of simControlStruct
+    simControlStruct simControl;
     int size, numPolygons;
     unsigned long long seed;
     curandState* globalState;
     double* positions;
     int* startIndices;
     double* areas;
-    int* countPerBox; //vector of count per box
+    int* countPerBox;
     int* boxId;
     int* neighborIndices;
     int* cellLocation;
@@ -96,7 +110,6 @@ private:
     double* perimeters;
     int pointDensity = -1;
     double overlapArea = 0.0;
-    // device buffer for per-sample intersection counts (added)
     int* intersectionsCounter;
     int* valid;
     uint64_t* outputIdx;
@@ -105,9 +118,8 @@ private:
     float2* tu, *tuTMP, *ut, *utTMP;
     int numIntersections = 0;
     uint64_t* outersections, *outersectionsTMP;
-    int* groupStart;
-    int* groupLength;
     uint32_t* keys;
+    int* next, *prev;
 };
 
 #endif
