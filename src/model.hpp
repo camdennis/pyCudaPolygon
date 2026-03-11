@@ -33,9 +33,12 @@ public:
 
     void setNumVertices(int size);
     void setPositions(const vector<double>& positions_);
+    void setForces(const vector<double>& forces_);
     void setStartIndices(const vector<int>& startIndices_);
     void setModelEnum(simControlStruct::modelEnum modelType_);
     void setMaxEdgeLength(double maxEdgeLength);
+    void setEdgeLengths(const vector<double>& edgeLengths_);
+    void setStiffness(const double stiffness_);
 
     // getters
 
@@ -69,6 +72,7 @@ public:
     unsigned long long getRandomSeed();
     vector<double> getAreas() const;
     double getEnergy() const;
+    vector<double> getEdgeLengths() const;
 
     // updaters
 
@@ -83,6 +87,7 @@ public:
     void updateOutersections();
     void updateCompactedIntersections();
     void updateForceEnergy();
+    void updatePositions(double dt);
 
 private:
     simControlStruct simControl;
@@ -93,6 +98,7 @@ private:
     double* positions;
     int* startIndices;
     double* areas;
+    double* edgeLengths;
     int* countPerBox;
     int* boxId;
     int* neighborIndices;
@@ -123,6 +129,9 @@ private:
     uint64_t* outersections, *outersectionsTMP;
     uint32_t* keys;
     int* next, *prev;
+    double stiffness;
+    int* shapeStart;
+    int* shapeEnd;
 };
 
 #endif

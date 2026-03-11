@@ -279,14 +279,49 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const flo
 }
 
 extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy) {
-    cudaMemset(force, 0, sizeof(double));   // size must be known – careful
     if (numIntersections <= 0) {
-        cudaMemset(force, 0, 2 * numVertices * sizeof(double));   // size must be known – careful
         return;
     }
     int threads = 256;
     int blocks = (numIntersections + threads - 1) / threads;
     size_t smem = threads * sizeof(double);
     updateForceEnergyExteriorKernel<<<blocks, threads, smem>>>(numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
+    cudaDeviceSynchronize();
+}
+
+extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd) {
+    // Initialise with sentinel values
+    int initBlocks = (numPolygons + blockSize - 1) / blockSize;
+    initShapeRangesKernel<<<initBlocks, blockSize>>>(shapeStart, shapeEnd, numPolygons, numIntersections);
+    cudaDeviceSynchronize();
+    // Find actual ranges using atomicMin/Max
+    int blocks = (numIntersections + blockSize - 1) / blockSize;
+    updateShapeRangesKernel<<<blocks, blockSize>>>(intersections, numIntersections, shapeStart, shapeEnd);
+    cudaDeviceSynchronize();
+}
+
+extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int numPolygons, int* shapeStart, int* shapeEnd) {
+    if (numIntersections == 0) return;
+    // Launch interior kernel
+    int threads = 256;
+    int grid = (numVertices + threads - 1) / threads;
+    updateForceEnergyInteriorKernel<<<grid, threads>>>(numVertices, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, shapeStart, shapeEnd);
+    cudaDeviceSynchronize();
+}
+
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* edgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+    int threads = 256;
+    int grid = (numVertices + threads - 1) / threads;
+    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, edgeLengths, next, prev, force, energy, stiffness);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt) {
+    int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
+    updatePositionsKernel<<<initBlocks, blockSize>>>(numVertices, positions, force, dt);
     cudaDeviceSynchronize();
 }

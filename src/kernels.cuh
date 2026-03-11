@@ -15,6 +15,16 @@ static const dim3 myBlockDim(16, 16);
 static const int blockSize = 256;
 static const double pi = 3.141592653589793238462643383279;
 
+// init
+
+__global__ void initShapeRangesKernel(int* shapeStart, int* shapeEnd, int numPolygons, int sentinel) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numPolygons) {
+        shapeStart[idx] = sentinel;
+        shapeEnd[idx]   = -1;
+    }
+}
+
 // structs:
 
 struct ExtractHigh32 {
@@ -323,10 +333,10 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         while (y < 0.0) {
             y += 1.0;
         }
-        while (x > 1.0) {
+        while (x >= 1.0) {
             x -= 1.0;
         }
-        while (y > 1.0) {
+        while (y >= 1.0) {
             y -= 1.0;
         }
         x -= 0.5;
@@ -341,10 +351,10 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         while (y < 0.0) {
             y += 1.0;
         }
-        while (x > 1.0) {
+        while (x >= 1.0) {
             x -= 1.0;
         }
-        while (y > 1.0) {
+        while (y >= 1.0) {
             y -= 1.0;
         }
         x = floor(x * boxSize);
@@ -990,3 +1000,140 @@ __global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint
     }
 }
 
+__global__ void updateShapeRangesKernel(const uint64_t* intersections, int numIntersections, int* shapeStart, int* shapeEnd) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numIntersections) return;
+    uint64_t inter = intersections[idx];
+    int s = (inter >> 32) & 0xFFFF;          // shape of the first vertex (i)
+    atomicMin(&shapeStart[s], idx);
+    atomicMax(&shapeEnd[s], idx);
+}
+
+__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* edgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= numVertices) return;
+    // get the edge ids
+    int prv = prev[m];
+    int nxt = next[m];
+    double l0 = edgeLengths[m];
+
+    double l, prvl;
+
+    double2 dvmzm, dvzpmm;
+    dvmzm.x = positions[2 * m] - positions[2 * nxt];
+    dvmzm.y = positions[2 * m + 1] - positions[2 * nxt + 1];
+    dvzpmm.x = positions[2 * prv] - positions[2 * m];
+    dvzpmm.y = positions[2 * prv + 1] - positions[2 * m + 1];
+
+    dvmzm.x  += 1.5;
+    dvmzm.y  += 1.5;
+    dvzpmm.x += 1.5;
+    dvzpmm.y += 1.5;
+
+
+    while (dvmzm.x  >= 1.0) dvmzm.x  -= 1.0;
+    while (dvmzm.y  >= 1.0) dvmzm.y  -= 1.0;
+    while (dvzpmm.x >= 1.0) dvzpmm.x -= 1.0;
+    while (dvzpmm.y >= 1.0) dvzpmm.y -= 1.0;
+
+    dvmzm.x  -= 0.5;
+    dvmzm.y  -= 0.5;
+    dvzpmm.x -= 0.5;
+    dvzpmm.y -= 0.5;
+
+    l = sqrt(dvmzm.x * dvmzm.x + dvmzm.y * dvmzm.y);
+    prvl = sqrt(dvzpmm.x * dvzpmm.x + dvzpmm.y * dvzpmm.y);
+    double coeff1 = 1 - l0 / l;
+    double coeff2 = 1 - l0 / prvl;
+
+    double localEnergy;
+    double2 localForceM;
+
+    localEnergy = (stiffness / 2) * (l - l0) * (l - l0);
+    localForceM.x = -(coeff1 * dvmzm.x - coeff2 * dvzpmm.x) * stiffness;
+    localForceM.y = -(coeff1 * dvmzm.y - coeff2 * dvzpmm.y) * stiffness;
+
+    if (localEnergy != 0.0) atomicAdd(energy, localEnergy);
+    if (localForceM.x != 0.0 || localForceM.y != 0.0) {
+        atomicAdd(&force[2 * m], localForceM.x);
+        atomicAdd(&force[2 * m + 1], localForceM.y);
+    }
+}
+
+__global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int* shapeStart, int* shapeEnd) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= numVertices) return;
+
+    int s = shapeId[m];
+    int startIdx = shapeStart[s];
+    int endIdx   = shapeEnd[s];
+    if (startIdx > endIdx) return;            // no intersections for this shape
+
+    int n = startIndices[s+1] - startIndices[s];
+    int mLoc = m - startIndices[s];
+
+    // Cache positions of edge (m -> next(m))
+    double2 pm    = *reinterpret_cast<const double2*>(&positions[2*m]);
+    int nxt       = next[m];
+    double2 pnxt  = *reinterpret_cast<const double2*>(&positions[2*nxt]);
+
+    double localEnergy = 0.0;
+    double2 localForceM  = {0.0, 0.0};
+    double2 localForceNxt = {0.0, 0.0};
+
+    for (int k = startIdx; k <= endIdx; ++k) {
+        uint64_t inter = intersections[k];
+        uint64_t outer = outersections[k];
+
+        int si = (inter >> 32) & 0xFFFF;      // must equal s
+        int sj = (inter >> 48) & 0xFFFF;
+        int iLoc = (inter >> 16) & 0xFFFF;
+        int lLoc = outer & 0xFFFF;
+
+        // Cyclic distances from iLoc to mLoc and to lLoc
+        int iDist = (mLoc - iLoc + n) % n;
+        int lDist = (lLoc - iLoc + n) % n;
+
+        // Condition from Python: edge lies strictly between i and l
+        if (iDist > 0 && iDist < lDist) {
+            // startPoint = first vertex of the earlier shape (si or sj)
+            int startID1 = startIndices[si];
+            int startID2 = startIndices[sj];
+            int startID = (startID1 < startID2) ? startID1 : startID2;
+            double2 startPoint = *reinterpret_cast<const double2*>(&positions[2*startID]);
+
+            // Energy contribution
+            localEnergy += h(pm, pnxt, startPoint);
+
+            // Gradient
+            double2 g1, g2;
+            g12(pm, pnxt, startPoint, g1, g2);
+
+            // Accumulate force (negative gradient, as in Python)
+            localForceM.x  -= g1.x;
+            localForceM.y  -= g1.y;
+            localForceNxt.x -= g2.x;
+            localForceNxt.y -= g2.y;
+        }
+    }
+
+    // Write back with atomics
+    if (localEnergy != 0.0)
+        atomicAdd(energy, localEnergy);
+    if (localForceM.x != 0.0 || localForceM.y != 0.0) {
+        atomicAdd(&force[2*m],   localForceM.x);
+        atomicAdd(&force[2*m+1], localForceM.y);
+    }
+    if (localForceNxt.x != 0.0 || localForceNxt.y != 0.0) {
+        atomicAdd(&force[2*nxt],   localForceNxt.x);
+        atomicAdd(&force[2*nxt+1], localForceNxt.y);
+    }
+}
+
+__global__ void updatePositionsKernel(int numVertices, double* positions, const double* force, double dt) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    positions[idx] = positions[idx] + force[idx] * dt;
+    positions[idx] += 1.0;
+    if (positions[idx] >= 1.0) positions[idx] -= 1.0;
+}

@@ -31,6 +31,10 @@ extern "C" int updateValidAndCountsCUDA(int numVertices, int* contacts, int* num
 extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu);
 extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const float2* tu, const float2* ut, const int* startIndices, int numIntersections, uint64_t* outersections);
 extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy);
+extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int numPolygons, int* shapeStart, int* shapeEnd);
+extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt);
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* edgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness);
+extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd);
 
 // Constructor
 
@@ -42,11 +46,12 @@ Model::Model(int size_)
       numContacts(nullptr), inside(nullptr), perimeters(nullptr), intersectionsCounter(nullptr),
       valid(nullptr), outputIdx(nullptr), shapeCounts(nullptr), intersections(nullptr),
       tu(nullptr), ut(nullptr), tuTMP(nullptr), utTMP(nullptr), outersections(nullptr),
-      outersectionsTMP(nullptr), keys(nullptr),
-      startIndices(nullptr), areas(nullptr)
+      outersectionsTMP(nullptr), keys(nullptr), startIndices(nullptr), areas(nullptr), edgeLengths(nullptr),
+      shapeStart(nullptr), shapeEnd(nullptr)
 {
     cudaFree(0);
     cudaMalloc((void**)&positions, 2 * size * sizeof(double));
+    cudaMalloc((void**)&edgeLengths, size * sizeof(double));
     cudaMalloc((void**)&force, size * 2 * sizeof(double));
     cudaMalloc((void**)&energy, sizeof(double));
 
@@ -266,13 +271,17 @@ void Model::updateOutersections() {
 }
 
 void Model::updateForceEnergy() {
-    if (numIntersections == 0) {
-        cudaMemset(force, 0, size * 2 * sizeof(double));
-        cudaMemset(energy, 0, sizeof(double));
-        return;
-    }
-
+    cudaMemset(force, 0, size * 2 * sizeof(double));
+    cudaMemset(energy, 0, sizeof(double));
+    updateForceEnergyEdgeCUDA(size, positions, edgeLengths, next, prev, force, energy, stiffness);
+    if (numIntersections == 0) return;
     updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
+    updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
+    updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
+}
+
+void Model::updatePositions(double dt) {
+    updatePositionsCUDA(size, positions, force, dt);
 }
 
 // setters
@@ -290,16 +299,33 @@ void Model::setPositions(const vector<double>& positionsData) {
     cudaMemcpy(positions, positionsData.data(), 2 * size * sizeof(double), cudaMemcpyHostToDevice);
 }
 
+void Model::setForces(const vector<double>& forcesData) {
+    // This can be deleted. I am using it for diagnostics
+    // and don't have plans to implement a feature which
+    // would use this.
+    cudaMemcpy(force, forcesData.data(), 2 * size * sizeof(double), cudaMemcpyHostToDevice);
+}
+
 void Model::setStartIndices(const vector<int>& startIndicesData) {
     numPolygons = startIndicesData.size() - 1;
     cudaMalloc((void**)&areas, numPolygons * sizeof(double));
     cudaMalloc((void**)&perimeters, numPolygons * sizeof(double));
     cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(int));
     cudaMemcpy(startIndices, startIndicesData.data(), (numPolygons + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(&shapeStart, numPolygons * sizeof(int));
+    cudaMalloc(&shapeEnd, numPolygons * sizeof(int));
 }
 
 void Model::setNumVertices(int numVertices_) {
     size = numVertices_;
+}
+
+void Model::setEdgeLengths(const vector<double>& edgeLengthsData) {
+    cudaMemcpy(edgeLengths, edgeLengthsData.data(), size * sizeof(double), cudaMemcpyHostToDevice);
+}
+
+void Model::setStiffness(const double stiffness_) {
+    stiffness = stiffness_;
 }
 
 // getters
@@ -522,4 +548,10 @@ vector<uint64_t> Model::getOutersections() const {
         cudaMemcpy(outersections_.data(), outersections, numIntersections * sizeof(uint64_t), cudaMemcpyDeviceToHost);
     }
     return outersections_;
+}
+
+vector<double> Model::getEdgeLengths() const {
+    vector<double> edgeLengths_(size);
+    cudaMemcpy(edgeLengths_.data(), edgeLengths, size * sizeof(double), cudaMemcpyDeviceToHost);
+    return edgeLengths_;
 }

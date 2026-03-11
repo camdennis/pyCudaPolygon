@@ -35,9 +35,10 @@ class model(lpcp.Model, *mixins.values()):
 
     # initializers
 
-    def __init__(self, size = 0, seed = None, modelType = "normal"):
+    def __init__(self, size = 0, seed = None, modelType = "normal", stiffness = 0):
         lpcp.Model.__init__(self, size)
         self.setModelEnum(modelType)
+        self.setStiffness(stiffness)
         if seed is None:
             self.rng = np.random.default_rng()
         else:
@@ -52,6 +53,9 @@ class model(lpcp.Model, *mixins.values()):
         lpcp.Model.initializeNeighborCells(self)
 
     # setters
+
+    def setStiffness(self, stiffness):
+        lpcp.Model.setStiffness(self, stiffness)
 
     def setModelEnum(self, modelType):
         if modelType == "abnormal":
@@ -155,6 +159,49 @@ class model(lpcp.Model, *mixins.values()):
                 maxEdgeLength = np.max([maxEdgeLength, length])
         lpcp.Model.setMaxEdgeLength(self, maxEdgeLength)
 
+    def setPerimeters(self, perimeters):
+        positions = self.getPositions()
+        oldPerimeters = self.getPerimeters()
+        #self.updateCOM()
+        com = self.getCOM()
+        nArray = self.getnArray()
+        numPolygons = len(nArray)
+        oldPerimeters = np.repeat(oldPerimeters, 2 * nArray)
+        com = com.reshape((numPolygons, 2))
+        shift = np.repeat(com, nArray, axis = 0).flatten()
+        rescaledPositions = positions - shift + 1.5
+        rescaledPositions %= 1
+        rescaledPositions -= 0.5
+        rescaledPositions *= np.repeat(perimeters, 2 * nArray) / oldPerimeters
+        rescaledPositions += shift + 1
+        rescaledPositions %= 1
+        self.setPositions(rescaledPositions)
+        self.perimeters = perimeters
+
+    def setBiPerimeters(self, ratio = 1.4):
+        perimeters = self.getPerimeters()
+        nArray = self.getnArray()
+        numPolygons = len(nArray)
+        meanPerimeter = np.mean(perimeters)
+        num0 = numPolygons // 2
+        num1 = numPolygons - num0
+        l0 = np.ones(num0) * meanPerimeter / (perimeters[:num0] * ratio)
+        l1 = np.ones(num1) * meanPerimeter / perimeters[num0:]
+        self.setPerimeters(np.concatenate((l0, l1)))
+        numVertices = self.getNumVertices()
+        speciesMap = np.zeros(numVertices, dtype = int)
+        speciesMap[numVertices // 2:] = 1
+        self.speciesMap = speciesMap
+
+    def setRestEdgeLengths(self, edgeLengths):
+        lpcp.Model.setEdgeLengths(self, edgeLengths)
+
+    def setStiffness(self, stiffness):
+        lpcp.Model.setStiffness(self, stiffness)
+
+    def setRestEdgeLengths(self, edgeLengths):
+        lpcp.Model.setEdgeLengths(self, edgeLengths)
+
     # getters
 
     def getModelEnum(self):
@@ -174,6 +221,23 @@ class model(lpcp.Model, *mixins.values()):
 
     def getPositions(self):
         return np.array(lpcp.Model.getPositions(self))
+
+    def getPerimeters(self):
+        starts = self.getStartIndices()
+        pos = self.getPositions()
+        perimeters = []
+        for i in range(len(starts) - 1):
+            p = np.concatenate((pos[starts[i] * 2 : starts[i + 1] * 2], pos[starts[i] * 2 : starts[i] * 2 + 2]))
+            xDiff = np.diff(p[::2])
+            yDiff = np.diff(p[1::2])
+            xDiff += 1.5
+            yDiff += 1.5
+            xDiff %= 1
+            yDiff %= 1
+            xDiff -= 0.5
+            yDiff -= 0.5
+            perimeters.append(np.sum(np.sqrt(xDiff**2 + yDiff**2)))
+        return np.array(perimeters)
 
     def getIntersectionsCounter(self):
         return np.array(lpcp.Model.getIntersectionsCounter(self))
@@ -327,7 +391,7 @@ class model(lpcp.Model, *mixins.values()):
 
         return df
 
-    def getConstraintMatrix(self):
+    def getConstraintMatrixTEST(self):
         shapeId = self.getShapeId()
         numVertices = self.getNumVertices()
         gl = np.zeros(2 * numVertices)
@@ -382,12 +446,101 @@ class model(lpcp.Model, *mixins.values()):
         dg, _ = np.linalg.qr(dg.T)
         return dg.T
 
-    def getConstrainedForce(self, force):
-        Q = self.getConstraintMatrix()
+    def getConstrainedForceTEST(self, force):
+        Q = self.getConstraintMatrixTEST()
         numVertices = self.getNumVertices()
-        Q2 = Q @ Q.T
         proj = np.identity(numVertices * 2) - np.dot(Q.T, Q)
         return np.dot(proj, force)
+
+    def MGS(self, constraintMatrix):
+        def normalizeBySpecies(v, speciesMap, numSpecies):
+            newV = v.copy()
+            sp2 = np.zeros(numSpecies)
+            for k in range(v.size):
+                sp2[speciesMap[k // 2]] += v[k]**2
+            for k in range(v.size):
+                newV[k] = v[k] / np.sqrt(sp2[speciesMap[k // 2]])
+            return newV
+
+        def innerProd(v, u, speciesMap, numSpecies):
+            ip = np.zeros(numSpecies)
+            for k in range(v.size):
+                ip[speciesMap[k // 2]] += v[k] * u[k]
+            return ip
+
+        def projection(v, u, ip, speciesMap):
+            for k in range(v.size):
+                v[k] = v[k] - u[k] * ip[speciesMap[k // 2]]
+            return v
+
+        speciesMap = self.getSpeciesMap()
+        numSpecies = np.max(speciesMap) + 1
+        g = constraintMatrix
+        for i in range(0, 4):
+            g[i] = normalizeBySpecies(g[i], speciesMap, numSpecies)
+            for j in range(i + 1, 4):
+                ip = innerProd(g[j], g[i], speciesMap, numSpecies)
+                g[j] = projection(g[j], g[i], ip, speciesMap)
+        return g
+
+    def getConstraintMatrix(self):
+        shapeId = self.getShapeId()
+        numVertices = self.getNumVertices()
+        gl = np.zeros(2 * numVertices)
+        gl2 = np.zeros(2 * numVertices)
+        positions = self.getPositions()
+        nArray = self.getnArray()
+        ap = np.zeros(nArray.size)
+        da = np.zeros(2 * numVertices)
+        startIndices = self.getStartIndices()
+        for j in range(numVertices):
+            dp1 = positions[j * 2 : j * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp2 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[j * 2 : j * 2 + 2]
+            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp1 += 1.5
+            dp2 += 1.5
+            dp3 += 1.5
+            dp1 %= 1
+            dp2 %= 1
+            dp3 %= 1
+            dp1 -= 0.5
+            dp2 -= 0.5
+            dp3 -= 0.5
+            denom1 = np.sqrt(np.sum(dp1**2))
+            denom2 = np.sqrt(np.sum(dp2**2))
+            gl[j * 2 : j * 2 + 2] = dp1 / denom1 - dp2 / denom2
+            gl2[j * 2 : j * 2 + 2] = 2 * (dp1 - dp2)
+            da[j * 2 : j * 2 + 2] = (np.arange(2) - 0.5) * dp3[::-1]
+            startID = startIndices[shapeId[j]]
+            startPoint = positions[2 * startID : 2 * startID + 2]
+            dpp1 = positions[2 * self.z(j) : 2 * self.z(j) + 2] - startPoint
+            dpp2 = positions[2 * j : 2 * j + 2] - startPoint
+            dpp1 += 1.5
+            dpp2 += 1.5
+            dpp1 %= 1
+            dpp2 %= 1
+            dpp1 -= 0.5
+            dpp2 -= 0.5
+            ap[shapeId[j]] += (dpp1 + dpp2)[1] * dp2[0] / 2
+        #print("ap = ", -ap)
+        ap = np.repeat(ap, nArray)
+        startPoints = np.concatenate((np.array([0]), np.cumsum(nArray)))
+        lVals = np.zeros(numVertices * 2)
+        da2 = np.zeros(2 * numVertices)
+        for j in range(numVertices):
+            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
+            dp3 += 1.5
+            dp3 %= 1
+            dp3 -= 0.5
+            da2[j * 2 : j * 2 +  2] = (np.arange(2) - 0.5) * dp3[::-1] * ap[j]
+        # Now we orthonormalize
+        dg = np.array(np.vstack((gl, gl2, da, da2)))
+        Q, _ = np.linalg.qr(dg.T)
+        return Q.T
+        return self.MGS(dg)
+
+    def getSpeciesMap(self):
+        return self.speciesMap
 
     def getAreas(self):
         # This is MC for now
@@ -420,6 +573,30 @@ class model(lpcp.Model, *mixins.values()):
             sol.append(delta)
         return np.array(sol)
 
+    def getCOM(self):
+        positions = self.getPositions()
+        startIndices = self.getStartIndices()
+        numPolygons = len(startIndices) - 1
+        com = np.zeros(2 * numPolygons)
+        for p in range(numPolygons):
+            start = startIndices[p]
+            end = startIndices[p + 1]
+            reference = positions[start * 2 : start * 2 + 2]
+            diff = positions[start * 2 : end * 2].reshape(end - start, 2) - reference
+            diff += 1.5
+            diff %= 1
+            diff -= 0.5
+            com[p * 2 + 0] = (np.mean(diff[::2]) + reference[0] + 1) % 1
+            com[p * 2 + 1] = (np.mean(diff[1::2]) + reference[1] + 1) % 1
+        return com
+
+    def getPhi(self):
+        return np.sum(self.getAreas())
+
+    def getRestEdgeLengths(self):
+        return np.array(lpcp.Model.getEdgeLengths(self))
+
+
     # updaters
 
     def updateNeighbors(self, a = 0):
@@ -447,6 +624,16 @@ class model(lpcp.Model, *mixins.values()):
         
     def updateForceEnergy(self):
         lpcp.Model.updateForceEnergy(self)
+
+    def updatePositions(self, dt):
+        lpcp.Model.updatePositions(self, dt)
+
+    def updateConstrainedForce(self):
+        return
+
+    def updateRestEdgeLengths(self):
+        edgeLengths = self.getEdgeLengths()
+        self.setRestEdgeLengths(edgeLengths)
 
     # helpers
 
@@ -485,29 +672,31 @@ class model(lpcp.Model, *mixins.values()):
 
     # misc
 
-    def minimizeGDStep(self, h = None, g12 = None, a = 0, lam = 0, pref = 1, dt = 1e-3, addedForce = None):
+    def minimizeGDStep(self, a = 0.01, dt = 1e-3, addedForce = None):
         #self.initializeNeighborCells()
-        self.updateNeighborCells()
-        self.updateNeighbors(a)
-        self.updateContacts()
-        self.updateOutersections()
         try:
-            overlapArea, force = self.functional(h = h, g12 = g12, lam = lam, pref = pref)
+            self.updateNeighborCells()
+            self.updateNeighbors(a)
+            self.updateContacts()
+            self.updateOutersections()
+            self.updateForceEnergy()
+            #overlapArea = self.getEnergy()
+            #force = self.getForces()
         except:
-            raise Exception("Something went wrong with the functional")
-        if (addedForce is not None):
-            force += addedForce
-        force = self.getConstrainedForce(force)
-        positions = self.getPositions()
-        positions += dt * force
-        positions += 1.0
-        positions %= 1.0
-        self.setPositions(positions)
-        return overlapArea
+            raise Exception("Something went wrong with updating the force and energy")
+        self.updateConstrainedForce()
+        force = self.getConstrainedForce(self.getForces())
+        self.setForces(force)
+        self.updatePositions(dt)
+        #positions = self.getPositions()
+        #positions += dt * force
+        #positions += 1.0
+        #positions %= 1.0
+        #self.setPositions(positions)
+        return self.getEnergy()
 
-    def minimizeGD(self, h = None, g12 = None, lam = 0, pref = 1, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1):
-        self.initializeNeighborCells()
-        with tqdm(total = maxSteps, desc="Processing", disable=(not progressBar)) as pbar:
+    def minimizeGD(self, a = 0.01, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1):
+        with tqdm(total = maxSteps, desc = "Processing", disable = (not progressBar)) as pbar:
             for step in range(maxSteps):
                 if checkpointDir is not None and (step % checkpointFreq == 0):
                     if not os.path.isdir(checkpointDir):
@@ -515,7 +704,7 @@ class model(lpcp.Model, *mixins.values()):
                     self.saveModel(checkpointDir + "/" + str(step))
                 if progressBar:
                     pbar.update(1)
-                if (self.minimizeGDStep(h = h, g12 = g12, lam = lam, pref = pref, addedForce = addedForce, dt = dt) == 0):
+                if (self.minimizeGDStep(a = a, addedForce = addedForce, dt = dt) == 0):
                     return 0
 
     def functionalExterior(self, h, g12 = None, lam = 0, pref = 1):
@@ -665,7 +854,6 @@ class model(lpcp.Model, *mixins.values()):
             exterior, exteriorForce = eef
         except TypeError:
             print("eef = ", eef)
-        return exterior, exteriorForce
         interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
         #return interior, interiorForce
         if (lam == 0 and exterior + interior < 0):

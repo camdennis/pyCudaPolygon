@@ -30,10 +30,12 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         .def("setNumVertices", &Model::setNumVertices)
         .def("setPositions", &Model::setPositions)
+        .def("setForces", &Model::setForces)
         .def("setModelEnum", &Model::setModelEnum)
         .def("setStartIndices", &Model::setStartIndices)
         .def("setMaxEdgeLength", &Model::setMaxEdgeLength)
-
+        .def("setEdgeLengths", &Model::setEdgeLengths)
+        .def("setStiffness", &Model::setStiffness)
         // updaters
 
         .def("updateAreas", &Model::updateAreas)
@@ -46,6 +48,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updateOutersections", &Model::updateOutersections)
         .def("updateOverlapArea", &Model::updateOverlapArea)
         .def("updateForceEnergy", &Model::updateForceEnergy)
+        .def("updatePositions", &Model::updatePositions)
 
         // getters
 
@@ -76,5 +79,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getOverlapArea", &Model::getOverlapArea)
         .def("getShapeCounts", &Model::getShapeCounts)
         .def("getForces", &Model::getForces)
-        .def("getEnergy", &Model::getEnergy);
+        .def("getEnergy", &Model::getEnergy)
+        .def("getEdgeLengths", &Model::getEdgeLengths);
 }
