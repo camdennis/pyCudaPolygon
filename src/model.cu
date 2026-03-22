@@ -12,6 +12,22 @@
 #include <cub/device/device_run_length_encode.cuh>
 #include "kernels.cuh"
 
+
+#include <iostream>
+#include <vector>
+#include "model.hpp"
+#include <cufft.h>
+#include <cuda_runtime.h>
+#include <complex>
+#include <math.h>
+#include <algorithm>
+#include <curand_kernel.h>
+#include "enumTypes.h"
+
+using namespace std;
+
+
+
 // initializers
 
 extern "C" void initializeRandomStates(curandState *globalState, unsigned long long int seed, int gridSize) {
@@ -65,6 +81,10 @@ extern "C" void computeNextPrevCUDA(int* next, int* prev, int* startIndices, int
     int numBlocks = (size + blockSize - 1) / blockSize;
     computeNextPrevKernel<<<numBlocks, blockSize>>>(next, prev, startIndices, shapeId, size);
 }
+
+struct Square {
+    __host__ __device__ double operator()(double x) const { return x * x; }
+};
 
 // updaters
 
@@ -158,9 +178,9 @@ extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int
     updateShapeIdKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, numPolygons);
 }
 
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox,double a,int* maxActualNeighbors) {
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox, int* maxActualNeighbors, float2* tu, bool* inside) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, a);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, tu, inside);
     cudaDeviceSynchronize();
 
     // initialize device accumulator for reduction
@@ -174,12 +194,6 @@ extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* posi
     int newMaxActualNeighbors;
     cudaMemcpy(&newMaxActualNeighbors, maxActualNeighbors, sizeof(int), cudaMemcpyDeviceToHost);
     return newMaxActualNeighbors;
-}
-
-extern "C" void updateContactsCUDA(const int* shapeId, const int* startIndices, const double* positions, const int size, const int* neighbors, const int* numNeighbors, const int maxNeighbors,bool* inside, float2* tu,int* contacts, int* numContacts) {
-    int numBlocks = (size + blockSize - 1) / blockSize;
-    updateContactsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, size, neighbors, numNeighbors, maxNeighbors, inside, contacts, numContacts, tu);
-    cudaDeviceSynchronize();
 }
 
 extern "C" int updateValidAndCountsCUDA(int numVertices, int* contacts, int* numContacts, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx) {
@@ -323,5 +337,34 @@ extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positio
 extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt) {
     int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
     updatePositionsKernel<<<initBlocks, blockSize>>>(numVertices, positions, force, dt);
+    cudaDeviceSynchronize();
+}
+
+extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce) {
+    int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
+    updateConstraintsKernel<<<initBlocks, blockSize>>>(numVertices, positions, next, prev, constraints);
+    cudaDeviceSynchronize();
+
+    cub::TransformInputIterator<double, Square, double*> squaredConstraints(constraints, Square{});
+
+    size_t requiredBytes = 0;
+    cub::DeviceSegmentedReduce::Sum(nullptr, requiredBytes, squaredConstraints, norm2,
+                                    numPolygons, startDOF, endDOF);
+    if (requiredBytes > *norm2TMPStorageBytes) {
+        if (*norm2TMP) cudaFree(*norm2TMP);
+        cudaMalloc(norm2TMP, requiredBytes);
+        *norm2TMPStorageBytes = requiredBytes;
+    }
+    cub::DeviceSegmentedReduce::Sum(*norm2TMP, *norm2TMPStorageBytes, squaredConstraints, norm2,
+                                    numPolygons, startDOF, endDOF);
+    cudaDeviceSynchronize();
+
+    cudaMemset(proj, 0, numPolygons * sizeof(double));
+    updateProjectionKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, shapeId,
+                                                      constraints, norm2, force, proj);
+    cudaDeviceSynchronize();
+
+    updateConstraintForcesKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, shapeId,
+                                                            constraints, force, proj, constraintForce);
     cudaDeviceSynchronize();
 }

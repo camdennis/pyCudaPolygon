@@ -259,20 +259,6 @@ class model(lpcp.Model, *mixins.values()):
             neigh[i] = allNeighbors
         return neigh
 
-    def getContacts(self):
-        v = self.getNumVertices()
-        contacts = np.array(lpcp.Model.getContacts(self))
-        maxNeighbors = len(contacts) // v
-        contacts = contacts.reshape(v, maxNeighbors)
-        cont = dict()
-        numContacts = self.getNumContacts()
-        for i, contact in enumerate(contacts):
-            allContacts = contact[:numContacts[i]]
-            if (len(allContacts) == 0):
-                continue
-            cont[i] = allContacts
-        return cont
-
     def getInsideFlag(self):
         # v = self.getNumVertices()
         return np.array(lpcp.Model.getInsideFlag(self))
@@ -317,6 +303,9 @@ class model(lpcp.Model, *mixins.values()):
 
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
+
+    def getConstraintForces(self):
+        return np.array(lpcp.Model.getConstraintForces(self))
 
     def getCentersOfMass(self):
         positions = self.getPositions()
@@ -599,11 +588,8 @@ class model(lpcp.Model, *mixins.values()):
 
     # updaters
 
-    def updateNeighbors(self, a = 0):
-        lpcp.Model.updateNeighbors(self, a)
-
-    def updateContacts(self):
-        lpcp.Model.updateContacts(self)
+    def updateNeighbors(self):
+        lpcp.Model.updateNeighbors(self)
 
     def updateValidAndCounts(self):
         return lpcp.Model.updateValidAndCounts(self)
@@ -628,12 +614,12 @@ class model(lpcp.Model, *mixins.values()):
     def updatePositions(self, dt):
         lpcp.Model.updatePositions(self, dt)
 
-    def updateConstrainedForce(self):
-        return
-
     def updateRestEdgeLengths(self):
         edgeLengths = self.getEdgeLengths()
         self.setRestEdgeLengths(edgeLengths)
+
+    def updateConstraintForces(self):
+        lpcp.Model.updateConstraintForces(self)
 
     # helpers
 
@@ -676,17 +662,14 @@ class model(lpcp.Model, *mixins.values()):
         #self.initializeNeighborCells()
         try:
             self.updateNeighborCells()
-            self.updateNeighbors(a)
-            self.updateContacts()
+            self.updateNeighbors()
             self.updateOutersections()
             self.updateForceEnergy()
             #overlapArea = self.getEnergy()
             #force = self.getForces()
         except:
             raise Exception("Something went wrong with updating the force and energy")
-        self.updateConstrainedForce()
-        force = self.getConstrainedForce(self.getForces())
-        self.setForces(force)
+        self.updateConstraintForces()
         self.updatePositions(dt)
         #positions = self.getPositions()
         #positions += dt * force
@@ -706,160 +689,6 @@ class model(lpcp.Model, *mixins.values()):
                     pbar.update(1)
                 if (self.minimizeGDStep(a = a, addedForce = addedForce, dt = dt) == 0):
                     return 0
-
-    def functionalExterior(self, h, g12 = None, lam = 0, pref = 1):
-        numVertices = self.getNumVertices()
-        intersections = self.getIntersections()
-        newTU = self.getTU()
-        newUT = self.getUT()
-        if (len(intersections) == 0):
-            return 0, np.zeros(numVertices * 2)
-        outersections = self.getOutersections()
-        positions = self.getPositions()
-        x = positions[::2]
-        y = positions[1::2]
-        sol = 0
-        shapeId = self.getShapeId()
-        nArray = self.getnArray()
-        startIndices = self.getStartIndices()
-        grad = np.zeros(numVertices * 2)
-        for index in range(len(outersections)):
-            # s(j), s(i), i, j
-            startID1 = startIndices[(intersections[index] >> 32) & 0xFFFF]
-            startID2 = startIndices[(intersections[index] >> 48) & 0xFFFF]
-            startID = np.min([startID1, startID2])
-            startPoint = positions[2 * startID : 2 * startID + 2]
-            i = ((intersections[index] >> 16) & 0xFFFF) + startID1
-            j = ((intersections[index]) & 0xFFFF) + startID2
-            k = ((outersections[index] >> 16) & 0xFFFF) + startID2
-            l = ((outersections[index]) & 0xFFFF) + startID1
-            zi = self.z(i)
-            zj = self.z(j)
-            zk = self.z(k)
-            zl = self.z(l)
-            pi = positions[2 * i: 2 * i + 2]
-            pj = positions[2 * j: 2 * j + 2]
-            pk = positions[2 * k: 2 * k + 2]
-            pl = positions[2 * l: 2 * l + 2]
-            pzi = positions[2 * zi: 2 * zi + 2]
-            pzj = positions[2 * zj: 2 * zj + 2]
-            pzk = positions[2 * zk: 2 * zk + 2]
-            pzl = positions[2 * zl: 2 * zl + 2]
-            r1 = pzi - pi + 1.5
-            r2 = pzk - pk + 1.5
-            r1 %= 1
-            r1 -= 0.5
-            r2 %= 1
-            r2 -= 0.5
-            t1 = newTU[2 * index + 1]
-            fij = (pi + t1 * r1 + 1) % 1
-            t2 = newUT[2 * index + 1]
-            fkl = (pk + t2 * r2 + 1) % 1
-            if (i == l):
-                sol += h(fij, fkl, startPoint, lam, pref)
-                if (g12 is not None):
-                    dfij = self.getDf(pi, pzi, pj, pzj)  # i<->j
-                    dfki = self.getDf(pk, pzk, pi, pzi)  # k<->i
-                    g1, g2 = g12(fij, fkl, startPoint, lam, pref)
-                    for alpha in range(2):
-                        # i and zi contributions
-                        grad[i * 2 + alpha]  += np.dot(g1, dfij[:, 0 + alpha]) + np.dot(g2, dfki[:, 4 + alpha])
-                        grad[zi * 2 + alpha] += np.dot(g1, dfij[:, 2 + alpha]) + np.dot(g2, dfki[:, 6 + alpha])
-                        
-                        # j and zj contributions
-                        grad[j * 2 + alpha]  += np.dot(g1, dfij[:, 4 + alpha])
-                        grad[zj * 2 + alpha] += np.dot(g1, dfij[:, 6 + alpha])
-                        
-                        # k and zk contributions
-                        grad[k * 2 + alpha]  += np.dot(g2, dfki[:, 0 + alpha])
-                        grad[zk * 2 + alpha] += np.dot(g2, dfki[:, 2 + alpha])
-            else:
-                sol += h(fij, positions[self.z(i) * 2: self.z(i) * 2 + 2], startPoint, lam, pref)
-                sol += h(positions[l * 2: l * 2 + 2], fkl, startPoint, lam, pref)
-                if (g12 is not None):
-                    g1, g2 = g12(fij, pzi, startPoint, lam, pref)
-                    dfij = self.getDf(pi, pzi, pj, pzj)  # i<->j
-                    dfkl = self.getDf(pk, pzk, pl, pzl)  # k<->i
-                    for alpha in range(2):
-                        grad[i * 2 + alpha] += np.dot(g1, dfij[:, 0 + alpha])
-                        grad[j * 2 + alpha] += np.dot(g1, dfij[:, 4 + alpha])
-                        grad[zi * 2 + alpha] += np.dot(g1, dfij[:, 2 + alpha]) + g2[alpha]
-                        grad[zj * 2 + alpha] += np.dot(g1, dfij[:, 6 + alpha])
-                    g1, g2 = g12(pl, fkl, startPoint, lam, pref)
-                    for alpha in range(2):
-                        grad[l * 2 + alpha] += g1[alpha] + np.dot(g2, dfkl[:, 4 + alpha])
-                        grad[k * 2 + alpha] += np.dot(g2, dfkl[:, 0 + alpha])
-                        grad[zl * 2 + alpha] += np.dot(g2, dfkl[:, 6 + alpha])
-                        grad[zk * 2 + alpha] += np.dot(g2, dfkl[:, 2 + alpha])
-        return sol, -grad
-
-    def functionalInterior(self, h, g12 = None, lam = 0, pref = 1):
-        numVertices = self.getNumVertices()
-        outersections = self.getOutersections()
-        shapeId = self.getShapeId()
-        intersections = self.getIntersections()
-        numIntersections = len(intersections)
-        nArray = self.getnArray()
-        startIndices = self.getStartIndices()
-        positions = self.getPositions()
-        sol = 0
-        grad = np.zeros(numVertices * 2)
-        mask = (1 << 48) - 1
-        for m in range(numVertices):                
-            s = shapeId[m]
-            n = nArray[s]
-            start = 0
-            end = numIntersections
-            lb = (s << 32)
-            ub = ((s + 1) << 32)
-            while (end > start):
-                mid = (end + start) // 2
-                if (intersections[mid] & mask < lb): 
-                    start = mid + 1
-                else:
-                    end = mid
-            index = start 
-            while (index < numIntersections and intersections[index] & mask < ub):
-                i = ((intersections[index] >> 16) & 0xFFFF) + startIndices[s]
-                l = ((outersections[index]) & 0xFFFF) + startIndices[s]
-                sj = (intersections[index] >> 48) & 0xFFFF
-                startID = startIndices[s]
-                startPointID = min(startID, startIndices[sj])
-                # The l + n - i works fine, but the mDist doesn't when m and i aren't
-                # in the same shape. 
-                mDist = (m + n - i) % n
-                lDist = (l + n - i) % n
-                if (mDist == 0 or mDist == lDist):
-                    index += 1
-                    continue
-                if (mDist < lDist):
-                    # This intersection does matter
-                    startPoint = positions[2 * startPointID : 2 * startPointID + 2]
-                    nextIndex = self.z(m)
-                    p1 = positions[m * 2: m * 2 + 2]
-                    p2 = positions[nextIndex * 2: nextIndex * 2 + 2]
-                    sol += h(p1, p2, startPoint, lam, pref)
-                    if (not (g12 is None)):
-                        g1, g2 = g12(p1, p2, startPoint, lam, pref)
-                        grad[m * 2] += g1[0]
-                        grad[m * 2 + 1] += g1[1]
-                        grad[nextIndex * 2] += g2[0]
-                        grad[nextIndex * 2 + 1] += g2[1]
-                index += 1
-        return sol, -grad
-
-    def functional(self, h, g12 = None, lam = 0, pref = 1):
-        eef = self.functionalExterior(h, g12 = g12, lam = lam, pref = pref)
-        try:
-            exterior, exteriorForce = eef
-        except TypeError:
-            print("eef = ", eef)
-        interior, interiorForce = self.functionalInterior(h, g12 = g12, lam = lam, pref = pref)
-        #return interior, interiorForce
-        if (lam == 0 and exterior + interior < 0):
-            raise Exception("negative energy found!")
-        #return interior, interiorForce
-        return exterior + interior, exteriorForce + interiorForce
 
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):

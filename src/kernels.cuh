@@ -363,7 +363,7 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
     }
 }
 
-__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, double a) {
+__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, float2* __restrict__ tu,  bool* __restrict__ inside) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
     if (id1 >= size) return;
@@ -465,9 +465,17 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
                 double tt = (gx * sy - gy * sx) / denom;
                 double uu = (gx * ry - gy * rx) / denom;
 
-                if (tt >= -a / rSize && tt <= 1.0 + a / rSize && uu >= -a / sSize && uu <= 1.0 + a / sSize) {
-                    if (neighborCount < maxNeighbors) {
-                        neighbors[id1 * maxNeighbors + neighborCount] = nid;
+                if (tt > 0.0 && tt < 1.0 && uu > 0.0 && uu < 1.0) {
+                    neighbors[id1 * maxNeighbors + neighborCount] = nid;
+                    if (denom > 0) {
+                        inside[id1 * maxNeighbors + neighborCount] = true;
+                        tu[id1 * maxNeighbors + neighborCount].x = tt;
+                        tu[id1 * maxNeighbors + neighborCount].y = uu;
+                    }
+                    else {
+                        inside[id1 * maxNeighbors + neighborCount] = false;
+                        tu[id1 * maxNeighbors + neighborCount].x = uu;
+                        tu[id1 * maxNeighbors + neighborCount].y = tt;
                     }
                     neighborCount++;
                 }
@@ -477,92 +485,19 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
     numNeighbors[id1] = neighborCount;
 }
 
-__global__ void updateContactsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int size, const int* __restrict__ neighbors, const int* __restrict__ numNeighbors, const int maxNeighbors, bool* __restrict__ inside, int* __restrict__ contacts, int* __restrict__ numContacts, float2* __restrict__ tu) {
-    const double eps = 1e-12;
-    int id1 = blockIdx.x * blockDim.x + threadIdx.x;
-    if (id1 >= size) return;
-    int shape = shapeId[id1];
-    int st = startIndices[shape + 1] - 1;
-    const double px = positions[2 * id1];
-    const double py = positions[2 * id1 + 1];
-    int id2 = (id1 == st) ? startIndices[shape] : id1 + 1;
-    double rx = positions[2 * id2] - px + 1.5;
-    double ry = positions[2 * id2 + 1] - py + 1.5;
-    // wrap once
-    while (rx > 1.0) rx -= 1.0;
-    while (ry > 1.0) ry -= 1.0;
-    rx -= 0.5;
-    ry -= 0.5;
-    int neighborStart = id1 * maxNeighbors;
-    int neighborEnd = id1 * maxNeighbors + numNeighbors[id1];
-    int contactCount = 0;
-    for (int index = neighborStart; index < neighborEnd; index++) {
-        int nid = neighbors[index];
-        int shape2 = shapeId[nid];
-        int st2 = startIndices[shape2 + 1] - 1;
-        int nid2 = (nid == st2) ? startIndices[shape2] : nid + 1;
-        // skip trivial/adjacent edges
-        if (nid == id1 || nid == id2 || nid2 == id1) continue;
-       // positions of neighbor edge
-        double qx = positions[2 * nid];
-        double qy = positions[2 * nid + 1];
-
-        double sx = positions[2 * nid2] - qx + 1.5;
-        double sy = positions[2 * nid2 + 1] - qy + 1.5;
-        double gx = qx - px + 1.5;
-        double gy = qy - py + 1.5;
-
-        // wrap once for these differences
-        while (sx > 1.0) sx -= 1.0;
-        while (sy > 1.0) sy -= 1.0;
-        while (gx > 1.0) gx -= 1.0;
-        while (gy > 1.0) gy -= 1.0;
-
-        sx -= 0.5;
-        sy -= 0.5;
-        gx -= 0.5;
-        gy -= 0.5;
-
-        double rSize = sqrt(rx * rx + ry * ry);
-        double sSize = sqrt(sx * sx + sy * sy);
-
-        double denom = rx * sy - ry * sx;
-        if (fabs(denom) < eps) continue; // parallel or degenerate
-
-        double tt = (gx * sy - gy * sx) / denom;
-        double uu = (gx * ry - gy * rx) / denom;
-
-        if (tt > 0.0 && tt < 1.0 && uu > 0.0 && uu < 1.0) {
-            contacts[id1 * maxNeighbors + contactCount] = nid;
-            if (denom > 0) {
-                inside[id1 * maxNeighbors + contactCount] = true;
-                tu[id1 * maxNeighbors + contactCount].x = tt;
-                tu[id1 * maxNeighbors + contactCount].y = uu;
-            }
-            else {
-                inside[id1 * maxNeighbors + contactCount] = false;
-                tu[id1 * maxNeighbors + contactCount].x = uu;
-                tu[id1 * maxNeighbors + contactCount].y = tt;
-            }
-            contactCount++;
-        }
-    }
-    numContacts[id1] = contactCount;
-}
-
-__global__ void updateValidAndCountsKernel(const int numVertices, const int* __restrict__ contacts, const int* __restrict__ numContacts, const int maxNeighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int numShapes, int* __restrict__ valid, int* __restrict__ shapeCounts) {
+__global__ void updateValidAndCountsKernel(const int numVertices, const int* __restrict__ neighbors, const int* __restrict__ numNeighbors, const int maxNeighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int numShapes, int* __restrict__ valid, int* __restrict__ shapeCounts) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int totalContacts = numVertices * maxNeighbors;
-    if (idx >= totalContacts) return;
+    int totalNeighbors = numVertices * maxNeighbors;
+    if (idx >= totalNeighbors) return;
 
     int n1 = idx / maxNeighbors;
     int i = idx % maxNeighbors;
 
     // Check if this contact slot is actually used
-    if (i < numContacts[n1]) {
+    if (i < numNeighbors[n1]) {
         valid[idx] = 1;
 
-        int n2 = contacts[idx];
+        int n2 = neighbors[idx];
         int s1 = shapeIds[n1];
         int s2 = shapeIds[n2];
         bool inside = insideFlag[idx];
@@ -574,16 +509,16 @@ __global__ void updateValidAndCountsKernel(const int numVertices, const int* __r
     }
 }
 
-__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ contacts, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, float2* __restrict__ tu) {
+__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, float2* __restrict__ tu) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int totalContacts = numVertices * maxNeighbors;
-    if (idx >= totalContacts) return;
+    int totalNeighbors = numVertices * maxNeighbors;
+    if (idx >= totalNeighbors) return;
     if (!valid[idx]) return;
 
     uint64_t outPos = outputIdx[idx];
 
     int n1 = idx / maxNeighbors;
-    int n2 = contacts[idx];
+    int n2 = neighbors[idx];
     int s1 = shapeIds[n1];
     int s2 = shapeIds[n2];
     n1 -= startIndices[s1];
@@ -1136,4 +1071,32 @@ __global__ void updatePositionsKernel(int numVertices, double* positions, const 
     positions[idx] = positions[idx] + force[idx] * dt;
     positions[idx] += 1.0;
     if (positions[idx] >= 1.0) positions[idx] -= 1.0;
+}
+
+__global__ void updateConstraintsKernel(int numVertices, double* positions, int* next, int* prev, double* constraints) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    // g = (2 alpha - 1) * (positions[prev] - positions[next])
+    constraints[idx] = (2 * alpha - 1) * (positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
+    constraints[idx] += 1.5;
+    while (constraints[idx] >= 1.0) constraints[idx] -= 1.0;
+    constraints[idx] -= 0.5;
+}
+
+__global__ void updateProjectionKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* norm2, double* force, double* proj) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    // which polygon, sir?
+    int s = shapeId[idx / 2];
+    double val = force[idx] * constraints[idx] / norm2[s];
+    atomicAdd(&proj[s], val);
+}
+
+__global__ void updateConstraintForcesKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* force, double* proj, double* constraintForce) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int s = shapeId[idx / 2];
+    constraintForce[idx] = force[idx] - proj[s] * constraints[idx];
 }

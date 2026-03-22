@@ -42,13 +42,14 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updatePerimeters", &Model::updatePerimeters)
         .def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
-        .def("updateContacts", &Model::updateContacts)
         .def("updateValidAndCounts", &Model::updateValidAndCounts)
         .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
         .def("updateOutersections", &Model::updateOutersections)
         .def("updateOverlapArea", &Model::updateOverlapArea)
         .def("updateForceEnergy", &Model::updateForceEnergy)
         .def("updatePositions", &Model::updatePositions)
+        .def("updateConstraintForces", &Model::updateConstraintForces)
+        .def("getConstraintForces", &Model::getConstraintForces)
 
         // getters
 
@@ -68,8 +69,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getOutersections", &Model::getOutersections)
         .def("getNeighbors", &Model::getNeighbors)
         .def("getNumNeighbors", &Model::getNumNeighbors)
-        .def("getContacts", &Model::getContacts)
-        .def("getNumContacts", &Model::getNumContacts)
         .def("getBoxCounts", &Model::getBoxCounts)
         .def("getInsideFlag", &Model::getInsideFlag)
         .def("getPerimeters", &Model::getPerimeters)

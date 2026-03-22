@@ -51,9 +51,7 @@ public:
     vector<int> getBoxCounts() const;
     vector<int> getNeighborIndices() const;
     vector<int> getNumNeighbors() const;
-    vector<int> getNumContacts() const;
     vector<int> getNeighbors() const;
-    vector<int> getContacts() const;
     double getMaxEdgeLength() const;
     string getModelEnum() const;
     vector<double> getForces() const;
@@ -73,13 +71,13 @@ public:
     vector<double> getAreas() const;
     double getEnergy() const;
     vector<double> getEdgeLengths() const;
+    vector<double> getConstraintForces() const;
 
     // updaters
 
     void updateAreas();
     void updateNeighborCells();
-    void updateNeighbors(double a);
-    void updateContacts();
+    void updateNeighbors();
     void updatePerimeters();
     void updateOverlapArea(int pointDensity_);
     void updateIntersectionsCounter();
@@ -88,6 +86,7 @@ public:
     void updateCompactedIntersections();
     void updateForceEnergy();
     void updatePositions(double dt);
+    void updateConstraintForces();
 
 private:
     simControlStruct simControl;
@@ -97,6 +96,7 @@ private:
     double* energy;
     double* positions;
     int* startIndices;
+    int* startDOF, *endDOF;
     double* areas;
     double* edgeLengths;
     int* countPerBox;
@@ -105,12 +105,10 @@ private:
     int* cellLocation;
     int* shapeId;
     int* neighbors;
-    int* contacts;
     int boxesUsed;
     int maxNeighbors = 100;
     int boxSize;
     int* numNeighbors;
-    int* numContacts;
     bool updateMaxNeighbors = false;
     double maxEdgeLength;
     double* force;
@@ -132,6 +130,11 @@ private:
     double stiffness;
     int* shapeStart;
     int* shapeEnd;
+    double* constraints, *constraintsTMP;
+    double* norm2, *norm2TMP;
+    size_t norm2TMPStorageBytes = 0;
+    double* proj;
+    double* constraintForce;
 };
 
 #endif
