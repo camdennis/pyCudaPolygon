@@ -49,7 +49,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updateForceEnergy", &Model::updateForceEnergy)
         .def("updatePositions", &Model::updatePositions)
         .def("updateConstraintForces", &Model::updateConstraintForces)
-        .def("getConstraintForces", &Model::getConstraintForces)
 
         // getters
 
@@ -75,9 +74,14 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getForces", &Model::getForces)
         .def("getTU", &Model::getTU)
         .def("getUT", &Model::getUT)
-        .def("getOverlapArea", &Model::getOverlapArea)
         .def("getShapeCounts", &Model::getShapeCounts)
         .def("getForces", &Model::getForces)
         .def("getEnergy", &Model::getEnergy)
-        .def("getEdgeLengths", &Model::getEdgeLengths);
+        .def("getEdgeLengths", &Model::getEdgeLengths)
+        .def("getConstraintForces", &Model::getConstraintForces)
+        .def("getNorm2", &Model::getNorm2)
+        .def("getConstraints", &Model::getConstraints)
+        .def("getProjection", &Model::getProjection)
+        .def("getMaxUnbalancedForce", &Model::getMaxUnbalancedForce)
+        .def("getOverlapArea", &Model::getOverlapArea);
 }

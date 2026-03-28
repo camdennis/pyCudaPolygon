@@ -222,6 +222,9 @@ class model(lpcp.Model, *mixins.values()):
     def getPositions(self):
         return np.array(lpcp.Model.getPositions(self))
 
+    def getAreaPerOverlap(self):
+        return np.array(lpcp.Model.getAreaPerOverlap(self))
+
     def getPerimeters(self):
         starts = self.getStartIndices()
         pos = self.getPositions()
@@ -304,6 +307,9 @@ class model(lpcp.Model, *mixins.values()):
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
 
+    def getConstraints(self):
+        return np.array(lpcp.Model.getConstraints(self))
+
     def getConstraintForces(self):
         return np.array(lpcp.Model.getConstraintForces(self))
 
@@ -321,9 +327,6 @@ class model(lpcp.Model, *mixins.values()):
             polygonPos -= 0.5
             csom.append(np.mean(polygonPos, axis = 0) + positions[2 * s : 2 * s + 2])
         return np.concatenate(csom)
-
-    def getOverlapArea(self):
-        return np.array(lpcp.Model.getOverlapArea(self))
 
     def getShapeCounts(self):
         return np.array(lpcp.Model.getShapeCounts(self))
@@ -434,6 +437,9 @@ class model(lpcp.Model, *mixins.values()):
         dg = np.array(np.vstack((gl, gl2, da, da2)))
         dg, _ = np.linalg.qr(dg.T)
         return dg.T
+
+    def getProj(self):
+        return np.array(lpcp.Model.getProjection(self))
 
     def getConstrainedForceTEST(self, force):
         Q = self.getConstraintMatrixTEST()
@@ -585,6 +591,11 @@ class model(lpcp.Model, *mixins.values()):
     def getRestEdgeLengths(self):
         return np.array(lpcp.Model.getEdgeLengths(self))
 
+    def getMaxUnbalancedForce(self):
+        return lpcp.Model.getMaxUnbalancedForce(self)
+
+    def getOverlapArea(self):
+        return lpcp.Model.getOverlapArea(self)
 
     # updaters
 
@@ -658,37 +669,45 @@ class model(lpcp.Model, *mixins.values()):
 
     # misc
 
+    def getNorm2(self):
+        return np.array(lpcp.Model.getNorm2(self))
+
     def minimizeGDStep(self, a = 0.01, dt = 1e-3, addedForce = None):
-        #self.initializeNeighborCells()
         try:
             self.updateNeighborCells()
             self.updateNeighbors()
             self.updateOutersections()
             self.updateForceEnergy()
+            self.updateConstraintForces()
+            self.updateAreas()
+            if (self.getMaxUnbalancedForce() > 10):
+                print("here")
+                return 0 
+            self.updatePositions(dt)
             #overlapArea = self.getEnergy()
             #force = self.getForces()
         except:
             raise Exception("Something went wrong with updating the force and energy")
-        self.updateConstraintForces()
-        self.updatePositions(dt)
         #positions = self.getPositions()
         #positions += dt * force
         #positions += 1.0
         #positions %= 1.0
         #self.setPositions(positions)
+#        print(self.getEnergy(), self.getMaxUnbalancedForce())
         return self.getEnergy()
 
-    def minimizeGD(self, a = 0.01, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1):
+    def minimizeGD(self, a = 0.01, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1, overwriteCheckpoint = False):
         with tqdm(total = maxSteps, desc = "Processing", disable = (not progressBar)) as pbar:
             for step in range(maxSteps):
                 if checkpointDir is not None and (step % checkpointFreq == 0):
                     if not os.path.isdir(checkpointDir):
                         os.makedirs(checkpointDir)
-                    self.saveModel(checkpointDir + "/" + str(step))
+                    self.saveModel(checkpointDir + "/" + str(step), overwrite = overwriteCheckpoint)
                 if progressBar:
                     pbar.update(1)
-                if (self.minimizeGDStep(a = a, addedForce = addedForce, dt = dt) == 0):
+                if (self.minimizeGDStep(addedForce = addedForce, dt = dt) == 0):
                     return 0
+
 
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):
@@ -738,6 +757,27 @@ class model(lpcp.Model, *mixins.values()):
             print("Warning: model enum not found. Setting to normal")
             self.setModelEnum("normal")
         self.setNumVertices(numVertices)
-        self.setnArray(state[:-self.getNumVertices() * 2].astype(int))
-        self.setPositions(state[-self.getNumVertices() * 2:])
+        nArray = state[:-self.getNumVertices() * 2].astype(int).copy()
+        self.setnArray(nArray)
+        positions = state[-self.getNumVertices() * 2:].copy()
+        self.setPositions(positions)
 
+    def makeSubModel(self, sub):
+        pos0 = self.getPositions()
+        nArray = self.getnArray()
+        nArraySub = nArray[sub]
+        totalVertices = np.sum(nArraySub)
+        positions = np.zeros(totalVertices * 2)
+        curr = 0
+        startIndices = self.getStartIndices()
+        for i in range(len(sub)):
+            ind1 = curr * 2
+            ind2 = curr * 2 + nArray[sub[i]] * 2
+            ind3 = startIndices[sub[i]] * 2
+            ind4 = startIndices[sub[i] + 1] * 2
+            positions[ind1 : ind2] = pos0[ind3 : ind4]
+            curr += nArray[sub[i]]
+        nArray = self.getnArray()[sub]
+        self.setNumVertices(positions.size // 2)
+        self.setPositions(positions)
+        self.setnArray(nArray)

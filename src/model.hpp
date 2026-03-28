@@ -8,6 +8,7 @@
 #include <math.h>
 #include <curand_kernel.h>
 #include "enumTypes.h"
+#include "cuda_check.h"
 
 using namespace std;
 
@@ -58,7 +59,6 @@ public:
     void resetMaxActualNeighbors();
     vector<bool> getInsideFlag() const;
     vector<double> getPerimeters() const;
-    double getOverlapArea() const;
     vector<int> getIntersectionsCounter() const;
     vector<double> getTU() const;
     vector<double> getUT() const;
@@ -69,9 +69,14 @@ public:
     vector<uint64_t> getOutersections() const;
     unsigned long long getRandomSeed();
     vector<double> getAreas() const;
+    vector<double> getNorm2() const;
     double getEnergy() const;
     vector<double> getEdgeLengths() const;
     vector<double> getConstraintForces() const;
+    double getMaxUnbalancedForce() const;
+    vector<double> getConstraints() const;
+    vector<double> getProjection() const;
+    double getOverlapArea() const;
 
     // updaters
 
@@ -135,6 +140,7 @@ private:
     size_t norm2TMPStorageBytes = 0;
     double* proj;
     double* constraintForce;
+    double maxUnbalancedForce;
 };
 
 #endif

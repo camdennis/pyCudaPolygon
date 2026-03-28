@@ -165,6 +165,10 @@ __device__ void getDf(double2 vi, double2 vzi, double2 vj, double2 vzj, double* 
     double2 dij = wrap2({vj.x - vi.x, vj.y - vi.y});
 
     double w = dj.x * di.y - dj.y * di.x;
+    if (fabs(w) < 1e-12) {
+        for (int i = 0; i < 16; i++) df[i] = 0.0;
+        return;
+    }
     double k = dj.x * dij.y - dj.y * dij.x;
     double u = k / w;
 
@@ -306,6 +310,16 @@ __global__ void updatePerimetersKernel(double* perimeters, double* positions, in
             while (dy > 1.0) dy -= 1.0;
             perimeters[idx] += sqrt(dx * dx + dy * dy);
         }
+        // closing edge: (end-1) -> start
+        dx = (positions[2 * end - 2] - positions[2 * start] + 0.5);
+        while (dx < 0.0) dx += 1.0;
+        while (dx > 1.0) dx -= 1.0;
+        dx -= 0.5;
+        dy = (positions[2 * end - 1] - positions[2 * start + 1] + 0.5);
+        while (dy < 0.0) dy += 1.0;
+        while (dy > 1.0) dy -= 1.0;
+        dy -= 0.5;
+        perimeters[idx] += sqrt(dx * dx + dy * dy);
     }
 }
 
@@ -378,13 +392,8 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
     const double px = positions[2 * id1];
     const double py = positions[2 * id1 + 1];
 
-    double rx = positions[2 * id2] - px + 1.5;
-    double ry = positions[2 * id2 + 1] - py + 1.5;
-    // wrap once
-    while (rx > 1.0) rx -= 1.0;
-    while (ry > 1.0) ry -= 1.0;
-    rx -= 0.5;
-    ry -= 0.5;
+    double rx = wrap(positions[2 * id2] - px);
+    double ry = wrap(positions[2 * id2 + 1] - py);
 
     int box = cellLocation[id1];
     int bx = box % boxSize;
@@ -434,50 +443,38 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
                 int nid2 = (nid == st2) ? startIndices[shape2] : nid + 1;
 
                 // skip trivial/adjacent edges
-                if (nid == id1 || nid == id2 || nid2 == id1) continue;
+                if (nid == id1 || nid == id2 || nid2 == id1 || nid2 == id2) continue;
 
                 // positions of neighbor edge
                 double qx = positions[2 * nid];
                 double qy = positions[2 * nid + 1];
 
-                double sx = positions[2 * nid2] - qx + 1.5;
-                double sy = positions[2 * nid2 + 1] - qy + 1.5;
-                double gx = qx - px + 1.5;
-                double gy = qy - py + 1.5;
-
-                // wrap once for these differences
-                while (sx > 1.0) sx -= 1.0;
-                while (sy > 1.0) sy -= 1.0;
-                while (gx > 1.0) gx -= 1.0;
-                while (gy > 1.0) gy -= 1.0;
-
-                sx -= 0.5;
-                sy -= 0.5;
-                gx -= 0.5;
-                gy -= 0.5;
-
-                double rSize = sqrt(rx * rx + ry * ry);
-                double sSize = sqrt(sx * sx + sy * sy);
+                double sx = wrap(positions[2 * nid2] - qx);
+                double sy = wrap(positions[2 * nid2 + 1] - qy);
+                double gx = wrap(qx - px);
+                double gy = wrap(qy - py);
 
                 double denom = rx * sy - ry * sx;
                 if (fabs(denom) < eps) continue; // parallel or degenerate
 
                 double tt = (gx * sy - gy * sx) / denom;
                 double uu = (gx * ry - gy * rx) / denom;
-
                 if (tt > 0.0 && tt < 1.0 && uu > 0.0 && uu < 1.0) {
-                    neighbors[id1 * maxNeighbors + neighborCount] = nid;
-                    if (denom > 0) {
-                        inside[id1 * maxNeighbors + neighborCount] = true;
-                        tu[id1 * maxNeighbors + neighborCount].x = tt;
-                        tu[id1 * maxNeighbors + neighborCount].y = uu;
+                    if (neighborCount < maxNeighbors) {
+                        // okay, we need to make sure these aren't parallel
+                        // if they are, we can ignore them.
+                        neighbors[id1 * maxNeighbors + neighborCount] = nid;
+                        if (denom > 0) {
+                            inside[id1 * maxNeighbors + neighborCount] = true;
+                            tu[id1 * maxNeighbors + neighborCount].x = tt;
+                            tu[id1 * maxNeighbors + neighborCount].y = uu;
+                        } else {
+                            inside[id1 * maxNeighbors + neighborCount] = false;
+                            tu[id1 * maxNeighbors + neighborCount].x = uu;
+                            tu[id1 * maxNeighbors + neighborCount].y = tt;
+                        }
                     }
-                    else {
-                        inside[id1 * maxNeighbors + neighborCount] = false;
-                        tu[id1 * maxNeighbors + neighborCount].x = uu;
-                        tu[id1 * maxNeighbors + neighborCount].y = tt;
-                    }
-                    neighborCount++;
+                    neighborCount++;    // ...always count, so numNeighbors reflects the true total
                 }
             }
         }
@@ -509,7 +506,7 @@ __global__ void updateValidAndCountsKernel(const int numVertices, const int* __r
     }
 }
 
-__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, float2* __restrict__ tu) {
+__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, const float2* __restrict__ tuSrc, float2* __restrict__ tuOut) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalNeighbors = numVertices * maxNeighbors;
     if (idx >= totalNeighbors) return;
@@ -524,8 +521,12 @@ __global__ void updateCompactedIntersectionsKernel(const int numVertices, const 
     n1 -= startIndices[s1];
     n2 -= startIndices[s2];
     bool inside = insideFlag[idx];
-    float tVal = tu[idx].x;
-    float uVal = tu[idx].y;
+    // Read source tu before any writes (tuSrc != tuOut: separate buffers required).
+    // Convention (established in updateNeighborsKernel and relied on throughout):
+    //   tu.y = parameter along si's edge (inner shape, bits [47:32] of packed)
+    //   tu.x = parameter along sj's edge (outer shape, bits [63:48] of packed)
+    float tVal = tuSrc[idx].x;
+    float uVal = tuSrc[idx].y;
 
     // Pack 64-bit intersection exactly as Python's pack()
     uint64_t packed;
@@ -543,10 +544,7 @@ __global__ void updateCompactedIntersectionsKernel(const int numVertices, const 
                  (uint64_t)(uint16_t)n2;
     }
     intersections[outPos] = packed;
-
-    // Store TU as float2 in required order
-    // TODO: Check if this is right
-    tu[outPos] = make_float2((float)tVal, (float)uVal);
+    tuOut[outPos] = make_float2(tVal, uVal);
 }
 
 __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, int pointDensity, int* __restrict__ intersectionsCounter, const int* __restrict__ neighborIndices, int size, int boxSize, const int* __restrict__ countPerBox, const double* __restrict__ positions) {
@@ -570,8 +568,10 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
     int cellY = int(py * boxSize);
     int boxCount = boxSize * boxSize;
 
-    // Track polygons we've already checked for this point
-    int trackedPolys[256];
+    // Track polygons we've already checked for this point.
+    // 512 slots handles very dense packings; if this overflows we break early
+    // rather than silently double-counting polygons.
+    int trackedPolys[512];
     int numTrackedPolys = 0;
 
     // Iterate over 3x3 neighboring boxes
@@ -632,14 +632,19 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
                     numIntersections++;
                 }
 
-                // Track this polygon
-                if (numTrackedPolys < 256) {
+                // Track this polygon; break if the deduplication array is full
+                // to avoid double-counting polygons seen in multiple cells.
+                if (numTrackedPolys < 512) {
                     trackedPolys[numTrackedPolys++] = polyId;
+                } else {
+                    // Array full — stop searching to preserve correctness.
+                    goto done;
                 }
             }
         }
     }
 
+    done:
     intersectionsCounter[idx] = numIntersections * (numIntersections - 1) / 2;
 //    intersectionsCounter[idx] = numIntersections;
 }
@@ -651,13 +656,11 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     uint64_t inter = intersections[idx];
     int sj = (inter >> 48) & 0xFFFF;
     int si = (inter >> 32) & 0xFFFF;
-    int i = ((inter >> 16) & 0xFFFF) + startIndices[si];
-//    int j = inter & 0xFFFF;
+    int i = ((inter >> 16) & 0xFFFF);
     int ni = startIndices[si + 1] - startIndices[si];
     uint64_t sij = ((uint64_t)si << 48) | ((uint64_t)sj << 32);
         
-    float tVal = tu[idx].x;
-    // next we need to find idj
+    float tVal = tu[idx].y;
     int start = 0;
     int end = numIntersections - 1;
     int mid;
@@ -678,12 +681,13 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     while (k < numIntersections && intersections[k] < ub) {
         uint64_t kInter = intersections[k];
         int l = kInter & 0xFFFF;
-        float uVal = tu[k].y;
+        float uVal = tu[k].x;
 
         int d = (l - i + ni) % ni;
 
         // Skip self-pairing if condition fails
         if (l == i && tVal >= uVal) {
+            k++;
             continue;
         }
 
@@ -698,225 +702,241 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
 
         // If this distance matches current best
         if (d == bestDist) {
-            // Prefer candidates with u >= tVal
-            if (uVal >= tVal && uVal < bestU) {
-                bestU = uVal;
-                bestIdx = k;
+            if (d == 0) {
+                // same edge. Now check t stuff
+                // Prefer candidates with u >= tVal
+                if (uVal >= tVal && uVal < bestU) {
+                    bestU = uVal;
+                    bestIdx = k;
+                }
+                // Keep fallback for those violating TU
+                if (uVal < fallbackU) {
+                    fallbackU = uVal;
+                    fallbackIdx = k;
+                }
             }
-            // Keep fallback for those violating TU
-            if (uVal < fallbackU) {
-                fallbackU = uVal;
-                fallbackIdx = k;
+            else {
+                if (uVal < bestU) {
+                    bestU = uVal;
+                    bestIdx = k;
+                }
             }
         }
         k++;
     }
     int player = (bestIdx != -1) ? bestIdx : fallbackIdx;
+    if (player == -1) {
+        // no valid partners. Falling back
+        outersections[idx] = intersections[idx];
+        ut[idx] = tu[idx];
+        return;
+    }
     outersections[idx] = intersections[player];
     ut[idx] = tu[player];
 }
 
 __global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint64_t* __restrict__ intersections, const uint64_t* __restrict__ outersections, const float2* __restrict__ tu, const float2* __restrict__ ut, const double* __restrict__ positions, const int* __restrict__ next, const int* __restrict__ prev, const int* __restrict__ shapeId, const int* __restrict__ startIndices, double* __restrict__ force, double* __restrict__ energyGlobal) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numIntersections) return;
-
-    uint64_t inter = intersections[idx];
-    uint64_t outer = outersections[idx];
-
-    uint16_t s1    = (inter >> 32) & 0xFFFF;   // shape index for i
-    uint16_t s2    = (inter >> 48) & 0xFFFF;   // shape index for j
-    uint16_t iLoc = (inter >> 16) & 0xFFFF;
-    uint16_t jLoc =  inter        & 0xFFFF;
-
-    uint16_t kLoc = (outer >> 16) & 0xFFFF;   // local index in shape s2
-    uint16_t lLoc =  outer        & 0xFFFF;   // local index in shape s1
-
-    int start1 = startIndices[s1];
-    int start2 = startIndices[s2];
-
-    int i = start1 + iLoc;
-    int j = start2 + jLoc;
-    int k = start2 + kLoc;          // using start2 for k
-    int l = start1 + lLoc;          // using start1 for l
-
-    double2 pi = *reinterpret_cast<const double2*>(&positions[2*i]);
-    double2 pj = *reinterpret_cast<const double2*>(&positions[2*j]);
-    double2 pk = *reinterpret_cast<const double2*>(&positions[2*k]);
-    double2 pl = *reinterpret_cast<const double2*>(&positions[2*l]);
-
-    int zi = next[i];
-    int zj = next[j];
-    int zk = next[k];
-    int zl = next[l];
-
-    double2 pzi = *reinterpret_cast<const double2*>(&positions[2*zi]);
-    double2 pzj = *reinterpret_cast<const double2*>(&positions[2*zj]);
-    double2 pzk = *reinterpret_cast<const double2*>(&positions[2*zk]);
-    double2 pzl = *reinterpret_cast<const double2*>(&positions[2*zl]);
-
-    // startPoint = first vertex of the earlier shape
-    int startID = (start1 < start2) ? start1 : start2;
-    double2 startPoint = *reinterpret_cast<const double2*>(&positions[2*startID]);
-
-    // ---- Edge vectors and parameters ----
-    double2 r1 = wrap2({pzi.x - pi.x, pzi.y - pi.y});
-    double2 r2 = wrap2({pzk.x - pk.x, pzk.y - pk.y});
-
-    float2 tuf = tu[idx];
-    float2 utf = ut[idx];
-    double t1 = tuf.y;          // second component
-    double t2 = utf.y;
-
-    // fij = (pi + t1*r1) mod 1
-    double2 fij;
-    fij.x = pi.x + t1 * r1.x;
-    fij.y = pi.y + t1 * r1.y;
-    fij.x = fmod(fij.x + 1.0, 1.0);
-    fij.y = fmod(fij.y + 1.0, 1.0);
-
-    double2 fkl;
-    fkl.x = pk.x + t2 * r2.x;
-    fkl.y = pk.y + t2 * r2.y;
-    fkl.x = fmod(fkl.x + 1.0, 1.0);
-    fkl.y = fmod(fkl.y + 1.0, 1.0);
 
     double localEnergy = 0.0;
 
-    if (i == l) {
-        // Branch 1: i == l
-        localEnergy += h(fij, fkl, startPoint);
+    if (idx < numIntersections) {
+        uint64_t inter = intersections[idx];
+        uint64_t outer = outersections[idx];
+        if (inter == outer) return;
 
-        double2 g1, g2;
-        g12(fij, fkl, startPoint, g1, g2);
+        uint16_t s1    = (inter >> 32) & 0xFFFF;   // shape index for i
+        uint16_t s2    = (inter >> 48) & 0xFFFF;   // shape index for j
+        uint16_t iLoc = (inter >> 16) & 0xFFFF;
+        uint16_t jLoc =  inter        & 0xFFFF;
 
-        double dfij[16], dfki[16];
-        getDf(pi, pzi, pj, pzj, dfij);
-        getDf(pk, pzk, pi, pzi, dfki);   // note order: (pk,pzk,pi,pzi)
+        uint16_t kLoc = (outer >> 16) & 0xFFFF;   // local index in shape s2
+        uint16_t lLoc =  outer        & 0xFFFF;   // local index in shape s1
 
-        // Helper lambda to add dot product of g with a column of df to a vertex
-        auto addContrib = [&](int v, int col_start, double2 g) {
-            double2 inc = {0.0, 0.0};
-            // col_start is the first column of the two belonging to the vertex
-            for (int beta = 0; beta < 2; ++beta) {
-                int col = col_start + beta;
-                double dot = g.x * dfij[col*2 + 0] + g.y * dfij[col*2 + 1];
-                if (beta == 0) inc.x = dot;
-                else inc.y = dot;
-            }
-            atomicAdd(&force[2*v],   -inc.x);
-            atomicAdd(&force[2*v+1], -inc.y);
-        };
+        int start1 = startIndices[s1];
+        int start2 = startIndices[s2];
 
-        // Contributions from dfij with g1
-        // vertex i (col 0-1)
-        addContrib(i, 0, g1);
-        // vertex zi (col 2-3)
-        addContrib(zi, 2, g1);
-        // vertex j (col 4-5)
-        addContrib(j, 4, g1);
-        // vertex zj (col 6-7)
-        addContrib(zj, 6, g1);
+        int i = start1 + iLoc;
+        int j = start2 + jLoc;
+        int k = start2 + kLoc;          // using start2 for k
+        int l = start1 + lLoc;          // using start1 for l
 
-        // Contributions from dfki with g2
-        auto addContrib2 = [&](int v, int col_start, double2 g) {
-            double2 inc = {0.0, 0.0};
-            for (int beta = 0; beta < 2; beta++) {
-                int col = col_start + beta;
-                double dot = g.x * dfki[col*2 + 0] + g.y * dfki[col*2 + 1];
-                if (beta == 0) inc.x = dot;
-                else inc.y = dot;
-            }
-            atomicAdd(&force[2*v],   -inc.x);
-            atomicAdd(&force[2*v+1], -inc.y);
-        };
-        // vertex k (col 0-1)
-        addContrib2(k, 0, g2);
-        // vertex zk (col 2-3)
-        addContrib2(zk, 2, g2);
-        // vertex i (col 4-5) – note: i already updated, we add again
-        addContrib2(i, 4, g2);
-        // vertex zi (col 6-7)
-        addContrib2(zi, 6, g2);
-    }
-    else {
-        // Branch 2: i != l
-        localEnergy += h(fij, pzi, startPoint);
-        localEnergy += h(pl, fkl, startPoint);
+        double2 pi = *reinterpret_cast<const double2*>(&positions[2*i]);
+        double2 pj = *reinterpret_cast<const double2*>(&positions[2*j]);
+        double2 pk = *reinterpret_cast<const double2*>(&positions[2*k]);
+        double2 pl = *reinterpret_cast<const double2*>(&positions[2*l]);
 
-        // First g12 (fij, pzi)
-        double2 g1a, g2a;
-        g12(fij, pzi, startPoint, g1a, g2a);
+        int zi = next[i];
+        int zj = next[j];
+        int zk = next[k];
+        int zl = next[l];
 
-        double dfij[16], dfkl[16];
-        getDf(pi, pzi, pj, pzj, dfij);
-        getDf(pk, pzk, pl, pzl, dfkl);
+        double2 pzi = *reinterpret_cast<const double2*>(&positions[2*zi]);
+        double2 pzj = *reinterpret_cast<const double2*>(&positions[2*zj]);
+        double2 pzk = *reinterpret_cast<const double2*>(&positions[2*zk]);
+        double2 pzl = *reinterpret_cast<const double2*>(&positions[2*zl]);
 
-        // Contributions from first g12 with dfij
-        auto addContribDfij = [&](int v, int col_start, double2 g) {
-            double2 inc = {0.0, 0.0};
-            for (int beta = 0; beta < 2; ++beta) {
-                int col = col_start + beta;
-                double dot = g.x * dfij[col*2 + 0] + g.y * dfij[col*2 + 1];
-                if (beta == 0) inc.x = dot;
-                else inc.y = dot;
-            }
-            atomicAdd(&force[2*v],   -inc.x);
-            atomicAdd(&force[2*v+1], -inc.y);
-        };
-        // i from dfij col 0-1 with g1a
-        addContribDfij(i, 0, g1a);
-        // j from dfij col 4-5 with g1a
-        addContribDfij(j, 4, g1a);
-        // zi from dfij col 2-3 with g1a, plus direct g2a
-        {
-            double2 inc = {0.0, 0.0};
-            for (int beta = 0; beta < 2; ++beta) {
-                int col = 2 + beta;   // col 2-3
-                double dot = g1a.x * dfij[col*2 + 0] + g1a.y * dfij[col*2 + 1];
-                if (beta == 0) inc.x = dot + g2a.x;
-                else inc.y = dot + g2a.y;
-            }
-            atomicAdd(&force[2*zi],   -inc.x);
-            atomicAdd(&force[2*zi+1], -inc.y);
+        // startPoint = first vertex of the earlier shape
+        int startID = (start1 < start2) ? start1 : start2;
+        double2 startPoint = *reinterpret_cast<const double2*>(&positions[2*startID]);
+
+        // ---- Edge vectors and parameters ----
+        double2 r1 = wrap2({pzi.x - pi.x, pzi.y - pi.y});
+        double2 r2 = wrap2({pzk.x - pk.x, pzk.y - pk.y});
+
+        float2 tuf = tu[idx];
+        float2 utf = ut[idx];
+        double t1 = tuf.y;          // second component
+        double t2 = utf.y;
+
+        // fij = (pi + t1*r1) mod 1
+        double2 fij;
+        fij.x = pi.x + t1 * r1.x;
+        fij.y = pi.y + t1 * r1.y;
+        fij.x = fmod(fij.x + 1.0, 1.0);
+        fij.y = fmod(fij.y + 1.0, 1.0);
+
+        double2 fkl;
+        fkl.x = pk.x + t2 * r2.x;
+        fkl.y = pk.y + t2 * r2.y;
+        fkl.x = fmod(fkl.x + 1.0, 1.0);
+        fkl.y = fmod(fkl.y + 1.0, 1.0);
+
+        if (i == l) {
+            // Branch 1: i == l
+            localEnergy += h(fij, fkl, startPoint);
+
+            double2 g1, g2;
+            g12(fij, fkl, startPoint, g1, g2);
+
+            double dfij[16], dfki[16];
+            getDf(pi, pzi, pj, pzj, dfij);
+            getDf(pk, pzk, pi, pzi, dfki);   // note order: (pk,pzk,pi,pzi)
+
+            // Helper lambda to add dot product of g with a column of df to a vertex
+            auto addContrib = [&](int v, int col_start, double2 g) {
+                double2 inc = {0.0, 0.0};
+                // col_start is the first column of the two belonging to the vertex
+                for (int beta = 0; beta < 2; ++beta) {
+                    int col = col_start + beta;
+                    double dot = g.x * dfij[col*2 + 0] + g.y * dfij[col*2 + 1];
+                    if (beta == 0) inc.x = dot;
+                    else inc.y = dot;
+                }
+                atomicAdd(&force[2*v],   -inc.x);
+                atomicAdd(&force[2*v+1], -inc.y);
+            };
+
+            // Contributions from dfij with g1
+            // vertex i (col 0-1)
+            addContrib(i, 0, g1);
+            // vertex zi (col 2-3)
+            addContrib(zi, 2, g1);
+            // vertex j (col 4-5)
+            addContrib(j, 4, g1);
+            // vertex zj (col 6-7)
+            addContrib(zj, 6, g1);
+
+            // Contributions from dfki with g2
+            auto addContrib2 = [&](int v, int col_start, double2 g) {
+                double2 inc = {0.0, 0.0};
+                for (int beta = 0; beta < 2; beta++) {
+                    int col = col_start + beta;
+                    double dot = g.x * dfki[col*2 + 0] + g.y * dfki[col*2 + 1];
+                    if (beta == 0) inc.x = dot;
+                    else inc.y = dot;
+                }
+                atomicAdd(&force[2*v],   -inc.x);
+                atomicAdd(&force[2*v+1], -inc.y);
+            };
+            // vertex k (col 0-1)
+            addContrib2(k, 0, g2);
+            // vertex zk (col 2-3)
+            addContrib2(zk, 2, g2);
+            // vertex i (col 4-5) – note: i already updated, we add again
+            addContrib2(i, 4, g2);
+            // vertex zi (col 6-7)
+            addContrib2(zi, 6, g2);
         }
-        // zj from dfij col 6-7 with g1a
-        addContribDfij(zj, 6, g1a);
+        else {
+            // Branch 2: i != l
+            localEnergy += h(fij, pzi, startPoint);
+            localEnergy += h(pl, fkl, startPoint);
 
-        // Second g12 (pl, fkl)
-        double2 g1b, g2b;
-        g12(pl, fkl, startPoint, g1b, g2b);
+            // First g12 (fij, pzi)
+            double2 g1a, g2a;
+            g12(fij, pzi, startPoint, g1a, g2a);
 
-        auto addContribDfkl = [&](int v, int col_start, double2 g) {
-            double2 inc = {0.0, 0.0};
-            for (int beta = 0; beta < 2; ++beta) {
-                int col = col_start + beta;
-                double dot = g.x * dfkl[col*2 + 0] + g.y * dfkl[col*2 + 1];
-                if (beta == 0) inc.x = dot;
-                else inc.y = dot;
+            double dfij[16], dfkl[16];
+            getDf(pi, pzi, pj, pzj, dfij);
+            getDf(pk, pzk, pl, pzl, dfkl);
+
+            // Contributions from first g12 with dfij
+            auto addContribDfij = [&](int v, int col_start, double2 g) {
+                double2 inc = {0.0, 0.0};
+                for (int beta = 0; beta < 2; ++beta) {
+                    int col = col_start + beta;
+                    double dot = g.x * dfij[col*2 + 0] + g.y * dfij[col*2 + 1];
+                    if (beta == 0) inc.x = dot;
+                    else inc.y = dot;
+                }
+                atomicAdd(&force[2*v],   -inc.x);
+                atomicAdd(&force[2*v+1], -inc.y);
+            };
+            // i from dfij col 0-1 with g1a
+            addContribDfij(i, 0, g1a);
+            // j from dfij col 4-5 with g1a
+            addContribDfij(j, 4, g1a);
+            // zi from dfij col 2-3 with g1a, plus direct g2a
+            {
+                double2 inc = {0.0, 0.0};
+                for (int beta = 0; beta < 2; ++beta) {
+                    int col = 2 + beta;   // col 2-3
+                    double dot = g1a.x * dfij[col*2 + 0] + g1a.y * dfij[col*2 + 1];
+                    if (beta == 0) inc.x = dot + g2a.x;
+                    else inc.y = dot + g2a.y;
+                }
+                atomicAdd(&force[2*zi],   -inc.x);
+                atomicAdd(&force[2*zi+1], -inc.y);
             }
-            atomicAdd(&force[2*v],   -inc.x);
-            atomicAdd(&force[2*v+1], -inc.y);
-        };
+            // zj from dfij col 6-7 with g1a
+            addContribDfij(zj, 6, g1a);
 
-        {
-            double2 inc = {g1b.x, g1b.y};
-            for (int beta = 0; beta < 2; ++beta) {
-                int col = 4 + beta;   // col 4-5
-                double dot = g2b.x * dfkl[col*2 + 0] + g2b.y * dfkl[col*2 + 1];
-                if (beta == 0) inc.x += dot;
-                else inc.y += dot;
+            // Second g12 (pl, fkl)
+            double2 g1b, g2b;
+            g12(pl, fkl, startPoint, g1b, g2b);
+
+            auto addContribDfkl = [&](int v, int col_start, double2 g) {
+                double2 inc = {0.0, 0.0};
+                for (int beta = 0; beta < 2; ++beta) {
+                    int col = col_start + beta;
+                    double dot = g.x * dfkl[col*2 + 0] + g.y * dfkl[col*2 + 1];
+                    if (beta == 0) inc.x = dot;
+                    else inc.y = dot;
+                }
+                atomicAdd(&force[2*v],   -inc.x);
+                atomicAdd(&force[2*v+1], -inc.y);
+            };
+
+            {
+                double2 inc = {g1b.x, g1b.y};
+                for (int beta = 0; beta < 2; ++beta) {
+                    int col = 4 + beta;   // col 4-5
+                    double dot = g2b.x * dfkl[col*2 + 0] + g2b.y * dfkl[col*2 + 1];
+                    if (beta == 0) inc.x += dot;
+                    else inc.y += dot;
+                }
+                atomicAdd(&force[2*l],   -inc.x);
+                atomicAdd(&force[2*l+1], -inc.y);
             }
-            atomicAdd(&force[2*l],   -inc.x);
-            atomicAdd(&force[2*l+1], -inc.y);
+            // k from dfkl col 0-1 with g2b
+            addContribDfkl(k, 0, g2b);
+            // zl from dfkl col 6-7 with g2b
+            addContribDfkl(zl, 6, g2b);
+            // zk from dfkl col 2-3 with g2b
+            addContribDfkl(zk, 2, g2b);
         }
-        // k from dfkl col 0-1 with g2b
-        addContribDfkl(k, 0, g2b);
-        // zl from dfkl col 6-7 with g2b
-        addContribDfkl(zl, 6, g2b);
-        // zk from dfkl col 2-3 with g2b
-        addContribDfkl(zk, 2, g2b);
     }
-
     // ---- Energy reduction ----
     // Use shared memory for block‑wise sum, then atomicAdd to global
     extern __shared__ double smem[];
@@ -931,7 +951,7 @@ __global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint
     }
 
     if (threadIdx.x == 0) {
-        atomicAdd(energyGlobal, smem[0]);
+        atomicAdd(energyGlobal, smem[0] / 2.0);
     }
 }
 
@@ -951,6 +971,7 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     int prv = prev[m];
     int nxt = next[m];
     double l0 = edgeLengths[m];
+    double l0prv = edgeLengths[prv];
 
     double l, prvl;
 
@@ -979,7 +1000,7 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     l = sqrt(dvmzm.x * dvmzm.x + dvmzm.y * dvmzm.y);
     prvl = sqrt(dvzpmm.x * dvzpmm.x + dvzpmm.y * dvzpmm.y);
     double coeff1 = 1 - l0 / l;
-    double coeff2 = 1 - l0 / prvl;
+    double coeff2 = 1 - l0prv / prvl;
 
     double localEnergy;
     double2 localForceM;
@@ -1019,6 +1040,7 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
     for (int k = startIdx; k <= endIdx; ++k) {
         uint64_t inter = intersections[k];
         uint64_t outer = outersections[k];
+        if (inter == outer) continue;
 
         int si = (inter >> 32) & 0xFFFF;      // must equal s
         int sj = (inter >> 48) & 0xFFFF;
@@ -1054,7 +1076,7 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
 
     // Write back with atomics
     if (localEnergy != 0.0)
-        atomicAdd(energy, localEnergy);
+        atomicAdd(energy, localEnergy / 2.0);
     if (localForceM.x != 0.0 || localForceM.y != 0.0) {
         atomicAdd(&force[2*m],   localForceM.x);
         atomicAdd(&force[2*m+1], localForceM.y);
@@ -1068,9 +1090,8 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
 __global__ void updatePositionsKernel(int numVertices, double* positions, const double* force, double dt) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
-    positions[idx] = positions[idx] + force[idx] * dt;
-    positions[idx] += 1.0;
-    if (positions[idx] >= 1.0) positions[idx] -= 1.0;
+    double p = positions[idx] + force[idx] * dt;
+    positions[idx] = p - floor(p);
 }
 
 __global__ void updateConstraintsKernel(int numVertices, double* positions, int* next, int* prev, double* constraints) {
@@ -1079,10 +1100,11 @@ __global__ void updateConstraintsKernel(int numVertices, double* positions, int*
     int k = idx / 2;
     int alpha = idx % 2;
     // g = (2 alpha - 1) * (positions[prev] - positions[next])
-    constraints[idx] = (2 * alpha - 1) * (positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
-    constraints[idx] += 1.5;
-    while (constraints[idx] >= 1.0) constraints[idx] -= 1.0;
-    constraints[idx] -= 0.5;
+    double c = (2 * alpha - 1) * (positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
+    c += 1.5;
+    while (c >= 1.0) c -= 1.0;
+    c -= 0.5;
+    constraints[idx] = c;
 }
 
 __global__ void updateProjectionKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* norm2, double* force, double* proj) {
@@ -1090,8 +1112,10 @@ __global__ void updateProjectionKernel(int numVertices, int numPolygons, int* sh
     if (idx >= numVertices * 2) return;
     // which polygon, sir?
     int s = shapeId[idx / 2];
-    double val = force[idx] * constraints[idx] / norm2[s];
-    atomicAdd(&proj[s], val);
+    if (norm2[s] > 1e-14) {
+        double val = force[idx] * constraints[idx] / norm2[s];
+        atomicAdd(&proj[s], val);
+    }
 }
 
 __global__ void updateConstraintForcesKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* force, double* proj, double* constraintForce) {
