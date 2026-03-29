@@ -239,7 +239,7 @@ __global__ void initIndicesKernel(uint32_t* indices, int n) {
 
 // updaters
 
-__global__ void updateAreasKernel(double* areas, double* positions, int* startIndices, int numPolygons) {
+__global__ void updateAreasCOMKernel(double* areas, double* positions, int* startIndices, int numPolygons) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numPolygons) {
         int start = startIndices[idx];
@@ -288,6 +288,36 @@ __global__ void updateAreasKernel(double* areas, double* positions, int* startIn
         }
         areas[idx] += dx * (dy1 - 0.5 + 2.0 * startY) / 2.0;
     }
+}
+
+__global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* constraints, double* areaParts, double* comParts) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    int startIndex = startIndices[shapeId[k]];
+    // g = (2 alpha - 1) * (positions[prev] - positions[next])
+    double c = (2 * alpha - 1) * wrap(positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
+    constraints[idx] = c;
+    // comPart_i,x =
+    double x1 = wrap(positions[idx] - positions[startIndex * 2 + alpha]);
+    double x2 = wrap(positions[next[k] * 2 + alpha] - positions[startIndex * 2 + alpha]);
+    comParts[k + numVertices * alpha] = (x1 + x2) * (x1 * x2);
+    if (alpha) return;
+    double y1 = wrap(positions[idx + 1] - positions[startIndex * 2 + 1]);
+    double y2 = wrap(positions[next[k] * 2 + 1] - positions[startIndex * 2 + 1]);
+    areaParts[k] = (y2 - y1) * (x2 + x1) / 2.0;
+}
+
+__global__ void normalizeKernel(int n, double* area, double* comX, double* comY) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    double A = area[i];
+    double inv = 1.0 / (6.0 * A);   // depends on your exact formula
+
+    comX[i] *= inv;
+    comY[i] *= inv;
 }
 
 __global__ void updatePerimetersKernel(double* perimeters, double* positions, int* startIndices, int numPolygons) {
@@ -964,14 +994,14 @@ __global__ void updateShapeRangesKernel(const uint64_t* intersections, int numIn
     atomicMax(&shapeEnd[s], idx);
 }
 
-__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* edgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
     int m = blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= numVertices) return;
     // get the edge ids
     int prv = prev[m];
     int nxt = next[m];
-    double l0 = edgeLengths[m];
-    double l0prv = edgeLengths[prv];
+    double l0 = targetEdgeLengths[m];
+    double l0prv = targetEdgeLengths[prv];
 
     double l, prvl;
 

@@ -34,11 +34,12 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setModelEnum", &Model::setModelEnum)
         .def("setStartIndices", &Model::setStartIndices)
         .def("setMaxEdgeLength", &Model::setMaxEdgeLength)
-        .def("setEdgeLengths", &Model::setEdgeLengths)
+        .def("setTargetEdgeLengths", &Model::setTargetEdgeLengths)
+        .def("setTargetAreas", &Model::setTargetAreas)
         .def("setStiffness", &Model::setStiffness)
         // updaters
 
-        .def("updateAreas", &Model::updateAreas)
+        .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
         .def("updatePerimeters", &Model::updatePerimeters)
         .def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
@@ -77,11 +78,12 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getShapeCounts", &Model::getShapeCounts)
         .def("getForces", &Model::getForces)
         .def("getEnergy", &Model::getEnergy)
-        .def("getEdgeLengths", &Model::getEdgeLengths)
+        .def("getTargetEdgeLengths", &Model::getTargetEdgeLengths)
         .def("getConstraintForces", &Model::getConstraintForces)
         .def("getNorm2", &Model::getNorm2)
         .def("getConstraints", &Model::getConstraints)
         .def("getProjection", &Model::getProjection)
         .def("getMaxUnbalancedForce", &Model::getMaxUnbalancedForce)
+        .def("getCOM", &Model::getCOM)
         .def("getOverlapArea", &Model::getOverlapArea);
 }

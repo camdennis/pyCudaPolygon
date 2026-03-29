@@ -13,6 +13,8 @@
 #include "kernels.cuh"
 #include "cuda_check.h"
 
+using namespace std;
+
 // initializers
 
 extern "C" void initializeRandomStates(curandState *globalState, unsigned long long int seed, int gridSize) {
@@ -102,10 +104,87 @@ double maxAbsValue(double* d_data, int n) {
 
 // updaters
 
-extern "C" void updateAreasCUDA(double* areas, double* positions, int* startIndices, int numPolygons) {
-    int numBlocks = (numPolygons + blockSize - 1) / blockSize;
-    updateAreasKernel<<<numBlocks, blockSize>>>(areas, positions, startIndices, numPolygons);
+extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* constraints, double* areaParts, double* comParts, double* area, double* comX, double* comY) {
+    int numBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
+    updatePolygonGeometryKernel<<<numBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, constraints, areaParts, comParts);
     CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // CUB reduce: sum all values in areaParts using startIndices as a divider.
+    // startIndices has numPolygons + 1 entries where the first is 0 and the last is
+    // numVertices.
+    // We want areas[i] to be the sum of the entries
+    // between startIndices[i] and startIndices[i + 1] for polygon i
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+
+    // temp storage query
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        areaParts,            // input
+        area,                 // output (numPolygons)
+        numPolygons,
+        startIndices,         // segment starts
+        startIndices + 1      // segment ends
+    ));
+
+    // allocate
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+
+    // run
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        areaParts,
+        area,
+        numPolygons,
+        startIndices,
+        startIndices + 1
+    ));
+    // CUB reduce: do the same exact thing with comParts and this will give you
+    // entries for com.
+    // com[i] is the x component of the centroid of polygon i if i is less than the number of polygons
+    // com[numPolygons + i] is the y component of the centroid of polygon i
+
+    // reuse temp storage if large enough
+    size_t temp_storage_bytes2 = 0;
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
+        nullptr, temp_storage_bytes2,
+        comParts, comX,
+        numPolygons,
+        startIndices,
+        startIndices + 1
+    ));
+
+    // resize if needed
+    if (temp_storage_bytes2 > temp_storage_bytes) {
+        CUDA_CHECK(cudaFree(d_temp_storage));
+        CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes2));
+        temp_storage_bytes = temp_storage_bytes2;
+    }
+
+    // X reduction
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        comParts,
+        comX,
+        numPolygons,
+        startIndices,
+        startIndices + 1
+    ));
+
+    // Y reduction
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        comParts + numVertices,
+        comY,
+        numPolygons,
+        startIndices,
+        startIndices + 1
+    ));
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, area, comX, comY);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons) {
@@ -360,10 +439,10 @@ extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersecti
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* edgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
-    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, edgeLengths, next, prev, force, energy, stiffness);
+    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, targetEdgeLengths, next, prev, force, energy, stiffness);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }

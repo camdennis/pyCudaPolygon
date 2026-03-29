@@ -82,7 +82,7 @@ class model(lpcp.Model, *mixins.values()):
 
     def setAreas(self, targetAreas):
         nArray = self.getnArray()
-        self.updateAreas()
+        self.updatePolygonGeometry()
         areas = self.getAreas()
         positions = self.getPositions().copy().reshape(self.getNumVertices(), 2)
 
@@ -120,13 +120,13 @@ class model(lpcp.Model, *mixins.values()):
 
         # write back flattened positions and update areas
         self.setPositions(positions.reshape(self.getNumVertices() * 2))
-        self.updateAreas()
+        self.updatePolygonGeometry()
         areas = self.getAreas()
 
     def setMonoArea(self, phi = 1):
         # This overrides phi!
         targetArea = phi / self.getNumPolygons()
-        self.updateAreas()
+        self.updatePolygonGeometry()
         areas = self.getAreas()
         # Let's keep phi the same
         n = self.getNumPolygons()
@@ -136,7 +136,7 @@ class model(lpcp.Model, *mixins.values()):
         self.setAreas(targetAreas)
 
     def setPhi(self, phi):
-        self.updateAreas()
+        self.updatePolygonGeometry()
         areas = self.getAreas()
         totalArea = np.sum(areas)
         targetAreas = phi * areas / totalArea
@@ -193,14 +193,14 @@ class model(lpcp.Model, *mixins.values()):
         speciesMap[numVertices // 2:] = 1
         self.speciesMap = speciesMap
 
-    def setRestEdgeLengths(self, edgeLengths):
-        lpcp.Model.setEdgeLengths(self, edgeLengths)
+    def setTargetEdgeLengths(self, targetEdgeLengths):
+        lpcp.Model.setTargetEdgeLengths(self, targetEdgeLengths)
+
+    def setTargetAreas(self, targetAreas):
+        lpcp.Model.setTargetAreas(self, targetAreas)
 
     def setStiffness(self, stiffness):
         lpcp.Model.setStiffness(self, stiffness)
-
-    def setRestEdgeLengths(self, edgeLengths):
-        lpcp.Model.setEdgeLengths(self, edgeLengths)
 
     # getters
 
@@ -541,49 +541,11 @@ class model(lpcp.Model, *mixins.values()):
         # This is MC for now
         return np.array(lpcp.Model.getAreas(self))
 
-    def getEdgeLengths(self):
-        # TODO: do this with CUDA
-        numPolygons = self.getNumPolygons()
-        numVertices = self.getNumVertices()
-        positions = self.getPositions()
-        nArray = self.getnArray()
-        startIndices = np.cumsum(np.concatenate(([0], nArray)))
-        endIndices = np.roll(startIndices, -1)
-        endIndices[-1] = numVertices
-        sol = []
-        for i in range(numPolygons):
-            startIndex = startIndices[i]
-            endIndex = endIndices[i]
-            for j in range(startIndex, endIndex - 1):
-                nextj = j + 1
-                deltaVec = positions[j * 2 : (j + 1) * 2] - positions[nextj * 2 : (nextj + 1) * 2] + 1.5
-                deltaVec %= 1
-                deltaVec -= 0.5
-                delta2 = (deltaVec)**2
-                delta = np.sqrt(np.sum(delta2))
-                sol.append(delta)
-            nextj = endIndex - 1
-            delta2 = (positions[nextj * 2 : nextj * 2 + 2] - positions[startIndex * 2 : (startIndex + 1) * 2])**2
-            delta = np.sqrt(np.sum(delta2))
-            sol.append(delta)
-        return np.array(sol)
+    def getTargetEdgeLengths(self):
+        return np.array(lpcp.Model.getTargetEdgeLengths(self))
 
     def getCOM(self):
-        positions = self.getPositions()
-        startIndices = self.getStartIndices()
-        numPolygons = len(startIndices) - 1
-        com = np.zeros(2 * numPolygons)
-        for p in range(numPolygons):
-            start = startIndices[p]
-            end = startIndices[p + 1]
-            reference = positions[start * 2 : start * 2 + 2]
-            diff = positions[start * 2 : end * 2].reshape(end - start, 2) - reference
-            diff += 1.5
-            diff %= 1
-            diff -= 0.5
-            com[p * 2 + 0] = (np.mean(diff[::2]) + reference[0] + 1) % 1
-            com[p * 2 + 1] = (np.mean(diff[1::2]) + reference[1] + 1) % 1
-        return com
+        return np.array(lpcp.Model.getCOM(self))
 
     def getPhi(self):
         return np.sum(self.getAreas())
@@ -612,9 +574,9 @@ class model(lpcp.Model, *mixins.values()):
         # This is MC
         lpcp.Model.updateOverlapArea(self, pointDensity)
 
-    def updateAreas(self):
+    def updatePolygonGeometry(self):
         # This is MC
-        lpcp.Model.updateAreas(self)
+        lpcp.Model.updatePolygonGeometry(self)
 
     def updateNeighborCells(self):
         lpcp.Model.updateNeighborCells(self)
@@ -625,9 +587,9 @@ class model(lpcp.Model, *mixins.values()):
     def updatePositions(self, dt):
         lpcp.Model.updatePositions(self, dt)
 
-    def updateRestEdgeLengths(self):
-        edgeLengths = self.getEdgeLengths()
-        self.setRestEdgeLengths(edgeLengths)
+    def updateTargetEdgeLengths(self):
+        edgeLengths = self.getTargetEdgeLengths()
+        self.setTargetEdgeLengths(targetEdgeLengths)
 
     def updateConstraintForces(self):
         lpcp.Model.updateConstraintForces(self)
@@ -679,7 +641,7 @@ class model(lpcp.Model, *mixins.values()):
             self.updateOutersections()
             self.updateForceEnergy()
             self.updateConstraintForces()
-            self.updateAreas()
+            self.updatePolygonGeometry()
             if (self.getMaxUnbalancedForce() > 10):
                 print("here")
                 return 0 
@@ -707,7 +669,6 @@ class model(lpcp.Model, *mixins.values()):
                     pbar.update(1)
                 if (self.minimizeGDStep(addedForce = addedForce, dt = dt) == 0):
                     return 0
-
 
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):

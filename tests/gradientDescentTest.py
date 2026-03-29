@@ -9,7 +9,7 @@ from pyCudaPolygonLink import libpyCudaPolygon as lpcp
 maxSteps = 20000
 
 numPolygons = 32
-n = 10
+n = 32
 nVals = [0, 1, 2, 3, 9, 4 ,5, 6, 20, 25, 35, 54]
 i = 5
 phi = 1.0
@@ -37,5 +37,5 @@ m.updateConstraintForces()
 force0 = m.getConstraintForces()
 positions0 = m.getPositions()# Now you have dA, can you draw arrows on the vertices?
 
-m.minimizeGD(dt = 1e-3, maxSteps = maxSteps)
+m.minimizeGD(dt = 1e-6, maxSteps = maxSteps)
 m.saveModel("gradientDescentTestModel", overwrite = True)

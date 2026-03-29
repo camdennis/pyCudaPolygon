@@ -38,7 +38,8 @@ public:
     void setStartIndices(const vector<int>& startIndices_);
     void setModelEnum(simControlStruct::modelEnum modelType_);
     void setMaxEdgeLength(double maxEdgeLength);
-    void setEdgeLengths(const vector<double>& edgeLengths_);
+    void setTargetEdgeLengths(const vector<double>& targetEdgeLengths_);
+    void setTargetAreas(const vector<double>& targetAreas_);
     void setStiffness(const double stiffness_);
 
     // getters
@@ -71,7 +72,9 @@ public:
     vector<double> getAreas() const;
     vector<double> getNorm2() const;
     double getEnergy() const;
-    vector<double> getEdgeLengths() const;
+    vector<double> getTargetEdgeLengths() const;
+    vector<double> getTargetAreas() const;
+    vector<double> getCOM() const;
     vector<double> getConstraintForces() const;
     double getMaxUnbalancedForce() const;
     vector<double> getConstraints() const;
@@ -80,7 +83,7 @@ public:
 
     // updaters
 
-    void updateAreas();
+    void updatePolygonGeometry();
     void updateNeighborCells();
     void updateNeighbors();
     void updatePerimeters();
@@ -101,9 +104,10 @@ private:
     double* energy;
     double* positions;
     int* startIndices;
-    int* startDOF, *endDOF;
+    int* startDOF;
+    int* endDOF;
     double* areas;
-    double* edgeLengths;
+    double* targetEdgeLengths;
     int* countPerBox;
     int* boxId;
     int* neighborIndices;
@@ -141,6 +145,11 @@ private:
     double* proj;
     double* constraintForce;
     double maxUnbalancedForce;
+    double* comX;
+    double* comY;
+    double* comParts;
+    double* areaParts;
+    double* targetAreas;
 };
 
 #endif
