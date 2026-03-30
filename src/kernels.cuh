@@ -299,25 +299,30 @@ __global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, do
     // g = (2 alpha - 1) * (positions[prev] - positions[next])
     double c = (2 * alpha - 1) * wrap(positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
     constraints[idx] = c;
-    // comPart_i,x =
+
     double x1 = wrap(positions[idx] - positions[startIndex * 2 + alpha]);
     double x2 = wrap(positions[next[k] * 2 + alpha] - positions[startIndex * 2 + alpha]);
-    comParts[k + numVertices * alpha] = (x1 + x2) * (x1 * x2);
+    comParts[k + numVertices * alpha] = x1;
     if (alpha) return;
-    double y1 = wrap(positions[idx + 1] - positions[startIndex * 2 + 1]);
-    double y2 = wrap(positions[next[k] * 2 + 1] - positions[startIndex * 2 + 1]);
-    areaParts[k] = (y2 - y1) * (x2 + x1) / 2.0;
+    double dy = wrap(positions[next[k] * 2 + 1] - positions[idx + 1]);
+    areaParts[k] = dy * (x2 + x1) / 2.0;
 }
 
-__global__ void normalizeKernel(int n, double* area, double* comX, double* comY) {
+__global__ void normalizeKernel(int numPolygons, double* comX, double* comY, double* positions, int* startIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-
-    double A = area[i];
-    double inv = 1.0 / (6.0 * A);   // depends on your exact formula
-
-    comX[i] *= inv;
-    comY[i] *= inv;
+    if (i >= numPolygons) return;
+    int n = startIndices[i + 1] - startIndices[i];
+    int startIdx = startIndices[i];
+    double comx = comX[i];
+    comx /= ((double) n);
+    comx += positions[2 * startIdx];
+    comx -= floor(comx);
+    comX[i] = comx;
+    double comy = comY[i];
+    comy /= ((double) n);
+    comy += positions[2 * startIdx + 1];
+    comy -= floor(comy);
+    comY[i] = comy;
 }
 
 __global__ void updatePerimetersKernel(double* perimeters, double* positions, int* startIndices, int numPolygons) {
@@ -1153,4 +1158,21 @@ __global__ void updateConstraintForcesKernel(int numVertices, int numPolygons, i
     if (idx >= numVertices * 2) return;
     int s = shapeId[idx / 2];
     constraintForce[idx] = force[idx] - proj[s] * constraints[idx];
+}
+
+//misc
+
+__global__ void resetAreasKernel(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;    
+    // which polygon, sir?
+    double x = positions[idx];
+    int s = shapeId[idx / 2];
+    double currentArea = areas[s];
+    double targetArea = targetAreas[s];
+    double rescale = sqrt(targetArea / currentArea);
+    double u = (idx % 2) ? wrap(x - comY[s]) : wrap(x - comX[s]);
+    u *= rescale;
+    double p = (idx % 2) ? u + comY[s] : u + comX[s];
+    positions[idx] = p - floor(p);
 }

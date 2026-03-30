@@ -51,6 +51,9 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updatePositions", &Model::updatePositions)
         .def("updateConstraintForces", &Model::updateConstraintForces)
 
+        // misc
+        .def("resetAreas", &Model:: resetAreas)
+
         // getters
 
         .def("getNumVertices", &Model::getNumVertices)

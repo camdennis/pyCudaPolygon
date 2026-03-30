@@ -96,6 +96,9 @@ public:
     void updatePositions(double dt);
     void updateConstraintForces();
 
+    // misc:
+    void resetAreas();
+
 private:
     simControlStruct simControl;
     int size, numPolygons;

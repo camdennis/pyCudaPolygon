@@ -182,7 +182,7 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
     ));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, area, comX, comY);
+    normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, comX, comY, positions, startIndices);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -454,9 +454,9 @@ extern "C" void updatePositionsCUDA(int numVertices, double* positions, const do
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce) {
+extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce, double* areaParts, double* comParts, int* startIndices) {
     int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
-    updateConstraintsKernel<<<initBlocks, blockSize>>>(numVertices, positions, next, prev, constraints);
+    updatePolygonGeometryKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, constraints, areaParts, comParts);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -485,6 +485,17 @@ extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// getters
+
 extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* constraintForce) {
     return maxAbsValue(constraintForce, numVertices * 2);
+}
+
+// misc
+extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
+    int threads = 256;
+    int grid = (numVertices * 2 + threads - 1) / threads;
+    resetAreasKernel<<<grid, threads>>>(numVertices, shapeId, positions, areas, targetAreas, comX, comY);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }

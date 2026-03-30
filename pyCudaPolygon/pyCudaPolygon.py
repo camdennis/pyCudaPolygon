@@ -594,6 +594,9 @@ class model(lpcp.Model, *mixins.values()):
     def updateConstraintForces(self):
         lpcp.Model.updateConstraintForces(self)
 
+    def resetAreas(self):
+        lpcp.Model.resetAreas(self)
+
     # helpers
 
     def z(self, i):

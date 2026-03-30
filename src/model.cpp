@@ -34,8 +34,11 @@ extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersecti
 extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt);
 extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness);
 extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd);
-extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce);
+extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce, double* areaParts, double* comParts, int* startIndices);
+// getters
 extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* constraintForce);
+// misc
+extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY);
 
 // Constructor
 
@@ -47,7 +50,8 @@ Model::Model(int size_)
       inside(nullptr), perimeters(nullptr), intersectionsCounter(nullptr),
       valid(nullptr), outputIdx(nullptr), shapeCounts(nullptr), intersections(nullptr),
       tu(nullptr), ut(nullptr), tuTMP(nullptr), utTMP(nullptr), outersections(nullptr),
-      outersectionsTMP(nullptr), keys(nullptr), startIndices(nullptr), startDOF(nullptr), endDOF(nullptr), constraints(nullptr), areas(nullptr), targetEdgeLengths(nullptr),
+      outersectionsTMP(nullptr), keys(nullptr), startIndices(nullptr), startDOF(nullptr), endDOF(nullptr), 
+      constraints(nullptr), areas(nullptr), targetAreas(nullptr), targetEdgeLengths(nullptr),
       shapeStart(nullptr), shapeEnd(nullptr), comX(nullptr), comY(nullptr), areaParts(nullptr), comParts(nullptr)
 {
     CUDA_CHECK(cudaFree(0));
@@ -279,7 +283,12 @@ void Model::updatePositions(double dt) {
 }
 
 void Model::updateConstraintForces() {
-    updateConstraintForcesCUDA(size, numPolygons, shapeId, positions, next, prev, startDOF, endDOF, constraints, norm2, &norm2TMP, &norm2TMPStorageBytes, force, proj, constraintForce);
+    updateConstraintForcesCUDA(size, numPolygons, shapeId, positions, next, prev, startDOF, endDOF, constraints, norm2, &norm2TMP, &norm2TMPStorageBytes, force, proj, constraintForce, areaParts, comParts, startIndices);
+}
+
+// misc
+void Model::resetAreas() {
+    resetAreasCUDA(size, shapeId, positions, areas, targetAreas, comX, comY);
 }
 
 // setters
@@ -316,6 +325,7 @@ void Model::setStartIndices(const vector<int>& startIndicesData) {
         endDOFData.push_back(startIndicesData[i + 1] * 2);
     }
     CUDA_CHECK(cudaMalloc((void**)&areas, numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&targetAreas, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&comX, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&comY, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&perimeters, numPolygons * sizeof(double)));
@@ -347,7 +357,7 @@ void Model::setTargetEdgeLengths(const vector<double>& targetEdgeLengthsData) {
 }
 
 void Model::setTargetAreas(const vector<double>& targetAreasData) {
-    CUDA_CHECK(cudaMemcpy(targetAreas, targetAreasData.data(), size * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(targetAreas, targetAreasData.data(), numPolygons * sizeof(double), cudaMemcpyHostToDevice));
 }
 
 void Model::setStiffness(const double stiffness_) {
@@ -494,7 +504,7 @@ vector<double> Model::getTargetAreas() const {
 }
 
 vector<double> Model::getCOM() const {
-    vector<double> com_(numPolygons);
+    vector<double> com_(numPolygons * 2);
     CUDA_CHECK(cudaMemcpy(com_.data(), comX, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(com_.data() + numPolygons, comY, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
     return com_;
