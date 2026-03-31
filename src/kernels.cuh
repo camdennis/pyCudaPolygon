@@ -1016,8 +1016,8 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     dvzpmm.x = positions[2 * prv] - positions[2 * m];
     dvzpmm.y = positions[2 * prv + 1] - positions[2 * m + 1];
 
-    dvmzm.x  += 1.5;
-    dvmzm.y  += 1.5;
+    dvmzm.x += 1.5;
+    dvmzm.y += 1.5;
     dvzpmm.x += 1.5;
     dvzpmm.y += 1.5;
 

@@ -3,7 +3,7 @@
 
 
 struct simControlStruct {
-	enum class modelEnum {normal, abnormal} modelType;
+	enum class modelEnum {normal, edgeOnly, abnormal} modelType;
 };
 
 #endif /* ENUMTYPES_H_ */

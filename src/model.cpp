@@ -269,12 +269,19 @@ void Model::updateForceEnergy() {
     CUDA_CHECK(cudaMemset(force, 0, size * 2 * sizeof(double)));
     CUDA_CHECK(cudaMemset(energy, 0, sizeof(double)));
     CUDA_CHECK(cudaDeviceSynchronize());
-    if (numIntersections != 0) {
-        updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
-        updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
-        updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
+    switch (simControl.modelType) {
+        case simControlStruct::modelEnum::normal: 
+            updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
+            updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
+            updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
+        case simControlStruct::modelEnum::edgeOnly:
+            updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, next, prev, force, energy, stiffness);
+            return;
+        case simControlStruct::modelEnum::abnormal: 
+            return;
+        default:
+            return;
     }
-    updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, next, prev, force, energy, stiffness);
 }
 
 void Model::updatePositions(double dt) {
@@ -368,7 +375,8 @@ void Model::setStiffness(const double stiffness_) {
 
 string Model::getModelEnum() const {
     switch (simControl.modelType) {
-        case simControlStruct::modelEnum::normal:   return "normal";
+        case simControlStruct::modelEnum::normal: return "normal";
+        case simControlStruct::modelEnum::edgeOnly: return "edgeOnly";
         case simControlStruct::modelEnum::abnormal: return "abnormal";
         default: return std::to_string(static_cast<int>(simControl.modelType));
     }
@@ -552,17 +560,7 @@ void Model::updateOverlapArea(int pointDensity_) {
     CUDA_CHECK(cudaMemset(intersectionsCounter, 0, total * sizeof(int)));
 
     // call CUDA routine that computes and returns the raw sum of intersectionsCounter entries
-    updateOverlapAreaCUDA(
-        shapeId,
-        startIndices,
-        pointDensity,
-        intersectionsCounter,
-        neighborIndices,
-        size,
-        boxSize,
-        countPerBox,
-        positions,
-        overlapArea
+    updateOverlapAreaCUDA(shapeId, startIndices, pointDensity, intersectionsCounter, neighborIndices, size, boxSize, countPerBox, positions, overlapArea
     );
 
     // normalize to fraction of sampled points -> overlap area estimate in [0,1]

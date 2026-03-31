@@ -12,6 +12,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(libpyCudaPolygon, m) {
     pybind11::enum_<simControlStruct::modelEnum>(m, "modelEnum")
         .value("normal", simControlStruct::modelEnum::normal)
+        .value("edgeOnly", simControlStruct::modelEnum::edgeOnly)
         .value("abnormal", simControlStruct::modelEnum::abnormal);
 
     py::class_<Model>(m, "Model")

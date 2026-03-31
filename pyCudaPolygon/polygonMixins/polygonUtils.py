@@ -49,7 +49,46 @@ class Mixin():
         # random number generator fallback
         self.rng = rng if rng is not None else np.random.default_rng()
 
-    def generateRandomPolygon(self, n, kappa, packingFraction):
+    def generateRandomPolygon(self, n):
+        angles = np.cumsum(np.concatenate(([0], self.rng.random(n - 1))))
+        angles *= 2 * np.pi / angles[-1]
+        radii = self.rng.random(n)
+        positions = np.zeros((n, 2))
+        positions[:, 0] = radii * np.cos(angles)
+        positions[:, 1] = radii * np.sin(angles)
+        return positions / 8
+
+    def generateRandomPolygons(self, numPolygons, n):
+        def rotate(vertices, angle):
+            cx, cy = np.mean(vertices, axis = 0)
+            for i in range(len(vertices)):
+                xNew = (vertices[i][0] - cx) * np.cos(angle) - (vertices[i][1] - cy) * np.sin(angle) + cx
+                yNew = (vertices[i][0] - cx) * np.sin(angle) + (vertices[i][1] - cy) * np.cos(angle) + cy
+                vertices[i] = [xNew, yNew]
+            return vertices              
+
+        self.setnArray(np.ones(numPolygons) * n)
+        numPolygons = self.getNumPolygons()
+        numVertices = self.getNumVertices()
+        positions = np.zeros((numVertices, 2))
+        l = np.ones(n)
+        i = 0
+        tries = 0
+        for i in range(numPolygons):
+            pos = self.generateRandomPolygon(n)
+            pos = rotate(pos, self.rng.random() * 2 * np.pi)
+            # Do a random translation
+            pos[:, 0] += self.rng.random()
+            pos[:, 1] += self.rng.random()
+            # wrap
+            pos += 2
+            pos %= 1
+            positions[i * n: (i + 1) * n] = pos
+        positions += 1
+        positions %= 1
+        self.setPositions(positions.reshape(numVertices * 2))
+
+    def generateSmoothRandomPolygon(self, n, kappa, packingFraction):
         targetArea = n**2 / kappa**2
         phi0 = self.rng.dirichlet(np.ones(n)) * 2 * np.pi
         phif0 = phi0[-1]
@@ -87,7 +126,7 @@ class Mixin():
         vertices[-1] = vertices[0]
         return vertices
 
-    def generateRandomPolygons(self, numPolygons, n, kappa, phi, maxTries = 10):
+    def generateRandomSmoothPolygons(self, numPolygons, n, kappa, phi, maxTries = 10):
         def rotate(vertices, angle):
             cx, cy = np.mean(vertices, axis = 0)
             for i in range(len(vertices)):

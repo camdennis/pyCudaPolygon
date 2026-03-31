@@ -60,6 +60,8 @@ class model(lpcp.Model, *mixins.values()):
     def setModelEnum(self, modelType):
         if modelType == "abnormal":
             lpcp.Model.setModelEnum(self, enums.modelEnum.abnormal)
+        elif modelType == "edgeOnly":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.edgeOnly)
         elif modelType == "normal":
             lpcp.Model.setModelEnum(self, enums.modelEnum.normal)
         else:
@@ -159,39 +161,29 @@ class model(lpcp.Model, *mixins.values()):
                 maxEdgeLength = np.max([maxEdgeLength, length])
         lpcp.Model.setMaxEdgeLength(self, maxEdgeLength)
 
-    def setPerimeters(self, perimeters):
-        positions = self.getPositions()
-        oldPerimeters = self.getPerimeters()
-        #self.updateCOM()
-        com = self.getCOM()
+    def setBiPerimeters(self, kappa, ratio = 1.4):
         nArray = self.getnArray()
         numPolygons = len(nArray)
-        oldPerimeters = np.repeat(oldPerimeters, 2 * nArray)
-        com = com.reshape((numPolygons, 2))
-        shift = np.repeat(com, nArray, axis = 0).flatten()
-        rescaledPositions = positions - shift + 1.5
-        rescaledPositions %= 1
-        rescaledPositions -= 0.5
-        rescaledPositions *= np.repeat(perimeters, 2 * nArray) / oldPerimeters
-        rescaledPositions += shift + 1
-        rescaledPositions %= 1
-        self.setPositions(rescaledPositions)
-        self.perimeters = perimeters
-
-    def setBiPerimeters(self, ratio = 1.4):
-        perimeters = self.getPerimeters()
-        nArray = self.getnArray()
-        numPolygons = len(nArray)
-        meanPerimeter = np.mean(perimeters)
-        num0 = numPolygons // 2
-        num1 = numPolygons - num0
-        l0 = np.ones(num0) * meanPerimeter / (perimeters[:num0] * ratio)
-        l1 = np.ones(num1) * meanPerimeter / perimeters[num0:]
-        self.setPerimeters(np.concatenate((l0, l1)))
         numVertices = self.getNumVertices()
-        speciesMap = np.zeros(numVertices, dtype = int)
-        speciesMap[numVertices // 2:] = 1
-        self.speciesMap = speciesMap
+        self.setMaxEdgeLength()
+        self.initializeNeighborCells()
+        self.updateNeighborCells()
+        self.updateNeighbors()
+        mid = numPolygons // 2
+        # The polygon 1 has total perimeter 1
+        # Polygon 2 has total perimeter ratio r
+        # Polygon 1 has a1 = (1 / kappa)**2
+        # Polygon 2 has a2 = (r / kappa)**2
+        self.updatePolygonGeometry()
+        minArea = np.min(self.getAreas())
+        targetAreas = np.ones(numPolygons) * minArea
+        targetAreas[:mid] /= ratio**2
+        self.setTargetAreas(targetAreas)
+        self.resetAreas()
+        targetEdgeLengths = kappa * np.sqrt(targetAreas) / nArray
+        targetEdgeLengths = np.repeat(targetEdgeLengths, nArray)
+        self.setTargetEdgeLengths(targetEdgeLengths)
+        self.updatePolygonGeometry()
 
     def setTargetEdgeLengths(self, targetEdgeLengths):
         lpcp.Model.setTargetEdgeLengths(self, targetEdgeLengths)
@@ -201,6 +193,19 @@ class model(lpcp.Model, *mixins.values()):
 
     def setStiffness(self, stiffness):
         lpcp.Model.setStiffness(self, stiffness)
+
+    def setPhi(self, phi):
+        self.updatePolygonGeometry()
+        targetAreas = self.getAreas()
+        areaRatio = phi / np.sum(targetAreas)
+        lengthRatio = np.sqrt(areaRatio)
+        targetAreas *= areaRatio
+        targetEdgeLengths = self.getTargetEdgeLengths() * lengthRatio
+        self.setTargetAreas(targetAreas)
+        self.setTargetEdgeLengths(targetEdgeLengths)
+        self.updatePolygonGeometry()
+        self.resetAreas()
+        self.updatePolygonGeometry()
 
     # getters
 
@@ -224,23 +229,6 @@ class model(lpcp.Model, *mixins.values()):
 
     def getAreaPerOverlap(self):
         return np.array(lpcp.Model.getAreaPerOverlap(self))
-
-    def getPerimeters(self):
-        starts = self.getStartIndices()
-        pos = self.getPositions()
-        perimeters = []
-        for i in range(len(starts) - 1):
-            p = np.concatenate((pos[starts[i] * 2 : starts[i + 1] * 2], pos[starts[i] * 2 : starts[i] * 2 + 2]))
-            xDiff = np.diff(p[::2])
-            yDiff = np.diff(p[1::2])
-            xDiff += 1.5
-            yDiff += 1.5
-            xDiff %= 1
-            yDiff %= 1
-            xDiff -= 0.5
-            yDiff -= 0.5
-            perimeters.append(np.sum(np.sqrt(xDiff**2 + yDiff**2)))
-        return np.array(perimeters)
 
     def getIntersectionsCounter(self):
         return np.array(lpcp.Model.getIntersectionsCounter(self))
@@ -383,61 +371,6 @@ class model(lpcp.Model, *mixins.values()):
 
         return df
 
-    def getConstraintMatrixTEST(self):
-        shapeId = self.getShapeId()
-        numVertices = self.getNumVertices()
-        gl = np.zeros(2 * numVertices)
-        gl2 = np.zeros(2 * numVertices)
-        positions = self.getPositions()
-        nArray = self.getnArray()
-        ap = np.zeros(nArray.size)
-        da = np.zeros(2 * numVertices)
-        startIndices = self.getStartIndices()
-        for j in range(numVertices):
-            dp1 = positions[j * 2 : j * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp2 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[j * 2 : j * 2 + 2]
-            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp1 += 1.5
-            dp2 += 1.5
-            dp3 += 1.5
-            dp1 %= 1
-            dp2 %= 1
-            dp3 %= 1
-            dp1 -= 0.5
-            dp2 -= 0.5
-            dp3 -= 0.5
-            denom1 = np.sqrt(np.sum(dp1**2))
-            denom2 = np.sqrt(np.sum(dp2**2))
-            gl[j * 2 : j * 2 + 2] = dp1 / denom1 - dp2 / denom2
-            gl2[j * 2 : j * 2 + 2] = 2 * (dp1 - dp2)
-            da[j * 2 : j * 2 + 2] = (np.arange(2) - 0.5) * dp3[::-1]
-            startID = startIndices[shapeId[j]]
-            startPoint = positions[2 * startID : 2 * startID + 2]
-            dpp1 = positions[2 * self.z(j) : 2 * self.z(j) + 2] - startPoint
-            dpp2 = positions[2 * j : 2 * j + 2] - startPoint
-            dpp1 += 1.5
-            dpp2 += 1.5
-            dpp1 %= 1
-            dpp2 %= 1
-            dpp1 -= 0.5
-            dpp2 -= 0.5
-            ap[shapeId[j]] += (dpp1 + dpp2)[1] * dp2[0] / 2
-        #print("ap = ", -ap)
-        ap = np.repeat(ap, nArray)
-        startPoints = np.concatenate((np.array([0]), np.cumsum(nArray)))
-        lVals = np.zeros(numVertices * 2)
-        da2 = np.zeros(2 * numVertices)
-        for j in range(numVertices):
-            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp3 += 1.5
-            dp3 %= 1
-            dp3 -= 0.5
-            da2[j * 2 : j * 2 +  2] = (np.arange(2) - 0.5) * dp3[::-1] * ap[j]
-        # Now we orthonormalize
-        dg = np.array(np.vstack((gl, gl2, da, da2)))
-        dg, _ = np.linalg.qr(dg.T)
-        return dg.T
-
     def getProj(self):
         return np.array(lpcp.Model.getProjection(self))
 
@@ -534,9 +467,6 @@ class model(lpcp.Model, *mixins.values()):
         return Q.T
         return self.MGS(dg)
 
-    def getSpeciesMap(self):
-        return self.speciesMap
-
     def getAreas(self):
         # This is MC for now
         return np.array(lpcp.Model.getAreas(self))
@@ -586,10 +516,6 @@ class model(lpcp.Model, *mixins.values()):
 
     def updatePositions(self, dt):
         lpcp.Model.updatePositions(self, dt)
-
-    def updateTargetEdgeLengths(self):
-        edgeLengths = self.getTargetEdgeLengths()
-        self.setTargetEdgeLengths(targetEdgeLengths)
 
     def updateConstraintForces(self):
         lpcp.Model.updateConstraintForces(self)
@@ -649,6 +575,9 @@ class model(lpcp.Model, *mixins.values()):
                 print("here")
                 return 0 
             self.updatePositions(dt)
+            self.updatePolygonGeometry()
+            self.resetAreas()
+            self.updatePolygonGeometry()
             #overlapArea = self.getEnergy()
             #force = self.getForces()
         except:
