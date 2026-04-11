@@ -20,11 +20,11 @@ extern "C" void applyPermutationCUDA_int64(const uint64_t* d_input, const uint32
 extern "C" void applyPermutationCUDA_float2(const float2* d_input, const uint32_t* d_perm, float2* d_output, int numItems);
 extern "C" void computeNextPrevCUDA(int* next, int* prev, int* startIndices, int* shapeId, int size);
 // updaters:
-extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* constraints, double* areaParts, double* comParts, double* area, double* comX, double* comY);
+extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* area, double* comX, double* comY, double* maxEdgeLength, double* constraints, double* constraintNormSq);
+extern "C" void projectForceCUDA(int numVertices, int numPolygons, int* shapeId, double* constraints, double* constraintNormSq, double* mgsIp, double* forceProjIp, double* force);
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
 extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int numPolygons);
 extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices, int size, int* neighbors, int* numNeighbors, int maxNeighbors, int boxSize, int* countPerBox, int* maxActualNeighbors, float2* tu, bool*);
-extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons);
 extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int pointDensity, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* positions, double& overlapArea);
 extern "C" int updateValidAndCountsCUDA(int numVertices, int* neighbors, int* numNeighbors, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx);
 extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbors, int* neighbors, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, float2* tu, float2* tuTMP);
@@ -32,11 +32,11 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const flo
 extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy);
 extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int numPolygons, int* shapeStart, int* shapeEnd);
 extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt);
-extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness);
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness);
+extern "C" void updateForceEnergyAreaCUDA(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility);
 extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd);
-extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce, double* areaParts, double* comParts, int* startIndices);
 // getters
-extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* constraintForce);
+extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force);
 // misc
 extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY);
 
@@ -50,18 +50,19 @@ Model::Model(int size_)
       inside(nullptr), perimeters(nullptr), intersectionsCounter(nullptr),
       valid(nullptr), outputIdx(nullptr), shapeCounts(nullptr), intersections(nullptr),
       tu(nullptr), ut(nullptr), tuTMP(nullptr), utTMP(nullptr), outersections(nullptr),
-      outersectionsTMP(nullptr), keys(nullptr), startIndices(nullptr), startDOF(nullptr), endDOF(nullptr), 
-      constraints(nullptr), areas(nullptr), targetAreas(nullptr), targetEdgeLengths(nullptr),
-      shapeStart(nullptr), shapeEnd(nullptr), comX(nullptr), comY(nullptr), areaParts(nullptr), comParts(nullptr)
+      outersectionsTMP(nullptr), keys(nullptr), next(nullptr), prev(nullptr), startIndices(nullptr),
+      areas(nullptr), targetAreas(nullptr), targetEdgeLengths(nullptr),
+      shapeStart(nullptr), shapeEnd(nullptr), edgeLengths(nullptr), maxEdgeLength(nullptr), comX(nullptr), comY(nullptr), areaParts(nullptr), comParts(nullptr),
+      constraintNormSq(nullptr), mgsIp(nullptr), forceProjIp(nullptr)
 {
     CUDA_CHECK(cudaFree(0));
     CUDA_CHECK(cudaMalloc((void**)&positions, 2 * size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&comParts, 2 * size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&areaParts, 2 * size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&targetEdgeLengths, size * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&constraints, 6 * size * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&edgeLengths, size * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&maxEdgeLength, sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&force, size * 2 * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&constraints, size * 2 * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&constraintForce, size * 2 * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&energy, sizeof(double)));
 
     CUDA_CHECK(cudaMalloc(&maxActualNeighbors, sizeof(int)));
@@ -100,13 +101,15 @@ Model::~Model() {
     if (outersectionsTMP) CUDA_CHECK_NOABORT(cudaFree(outersectionsTMP));
     if (next) CUDA_CHECK_NOABORT(cudaFree(next));
     if (prev) CUDA_CHECK_NOABORT(cudaFree(prev));
+    if (edgeLengths) CUDA_CHECK_NOABORT(cudaFree(edgeLengths));
+    if (maxEdgeLength) CUDA_CHECK_NOABORT(cudaFree(maxEdgeLength));
     // From setStartIndices
     if (areas) CUDA_CHECK_NOABORT(cudaFree(areas));
     if (perimeters) CUDA_CHECK_NOABORT(cudaFree(perimeters));
     if (startIndices) CUDA_CHECK_NOABORT(cudaFree(startIndices));
-    if (startDOF) CUDA_CHECK_NOABORT(cudaFree(startDOF));
-    if (endDOF) CUDA_CHECK_NOABORT(cudaFree(endDOF));
-
+    if (constraintNormSq) CUDA_CHECK_NOABORT(cudaFree(constraintNormSq));
+    if (mgsIp) CUDA_CHECK_NOABORT(cudaFree(mgsIp));
+    if (forceProjIp) CUDA_CHECK_NOABORT(cudaFree(forceProjIp));
     // From updateOverlapArea
     if (intersectionsCounter) CUDA_CHECK_NOABORT(cudaFree(intersectionsCounter));
 }
@@ -126,6 +129,28 @@ void Model::deallocateAll() {
 // initializers
 
 void Model::initializeNeighborCells() {
+    if (countPerBox)     { CUDA_CHECK_NOABORT(cudaFree(countPerBox));     countPerBox     = nullptr; }
+    if (boxId)           { CUDA_CHECK_NOABORT(cudaFree(boxId));           boxId           = nullptr; }
+    if (cellLocation)    { CUDA_CHECK_NOABORT(cudaFree(cellLocation));    cellLocation    = nullptr; }
+    if (neighborIndices) { CUDA_CHECK_NOABORT(cudaFree(neighborIndices)); neighborIndices = nullptr; }
+    if (neighbors)       { CUDA_CHECK_NOABORT(cudaFree(neighbors));       neighbors       = nullptr; }
+    if (inside)          { CUDA_CHECK_NOABORT(cudaFree(inside));          inside          = nullptr; }
+    if (shapeId)         { CUDA_CHECK_NOABORT(cudaFree(shapeId));         shapeId         = nullptr; }
+    if (next)            { CUDA_CHECK_NOABORT(cudaFree(next));            next            = nullptr; }
+    if (prev)            { CUDA_CHECK_NOABORT(cudaFree(prev));            prev            = nullptr; }
+    if (numNeighbors)    { CUDA_CHECK_NOABORT(cudaFree(numNeighbors));    numNeighbors    = nullptr; }
+    if (valid)           { CUDA_CHECK_NOABORT(cudaFree(valid));           valid           = nullptr; }
+    if (outputIdx)       { CUDA_CHECK_NOABORT(cudaFree(outputIdx));       outputIdx       = nullptr; }
+    if (shapeCounts)     { CUDA_CHECK_NOABORT(cudaFree(shapeCounts));     shapeCounts     = nullptr; }
+    if (intersections)   { CUDA_CHECK_NOABORT(cudaFree(intersections));   intersections   = nullptr; }
+    if (tu)              { CUDA_CHECK_NOABORT(cudaFree(tu));              tu              = nullptr; }
+    if (ut)              { CUDA_CHECK_NOABORT(cudaFree(ut));              ut              = nullptr; }
+    if (tuTMP)           { CUDA_CHECK_NOABORT(cudaFree(tuTMP));           tuTMP           = nullptr; }
+    if (utTMP)           { CUDA_CHECK_NOABORT(cudaFree(utTMP));           utTMP           = nullptr; }
+    if (outersections)   { CUDA_CHECK_NOABORT(cudaFree(outersections));   outersections   = nullptr; }
+    if (outersectionsTMP){ CUDA_CHECK_NOABORT(cudaFree(outersectionsTMP));outersectionsTMP= nullptr; }
+    if (keys)            { CUDA_CHECK_NOABORT(cudaFree(keys));            keys            = nullptr; }
+
     int numBoxes = boxSize * boxSize;
     CUDA_CHECK(cudaMalloc((void**)&countPerBox, numBoxes * sizeof(int)));
     CUDA_CHECK(cudaMalloc((void**)&boxId, numBoxes * sizeof(int)));
@@ -180,6 +205,20 @@ vector<uint32_t> Model::getKeys() const {
 // updaters
 
 void Model::updateNeighborCells() {
+    // Sync boxSize to the current max edge length so the 3x3 cell search
+    // always covers a full edge length — critical after setPhi() changes scale.
+    double currentMaxEdge;
+    CUDA_CHECK(cudaMemcpy(&currentMaxEdge, maxEdgeLength, sizeof(double), cudaMemcpyDeviceToHost));
+    if (currentMaxEdge > 1e-14) {
+        int newBoxSize = (int)floor(1.0 / currentMaxEdge);
+        if (newBoxSize > 0 && newBoxSize != boxSize) {
+            boxSize = newBoxSize;
+            if (countPerBox) { CUDA_CHECK_NOABORT(cudaFree(countPerBox)); countPerBox = nullptr; }
+            if (boxId)       { CUDA_CHECK_NOABORT(cudaFree(boxId));       boxId       = nullptr; }
+            CUDA_CHECK(cudaMalloc((void**)&countPerBox, boxSize * boxSize * sizeof(int)));
+            CUDA_CHECK(cudaMalloc((void**)&boxId,       boxSize * boxSize * sizeof(int)));
+        }
+    }
     updateNeighborCellsCUDA(positions, startIndices, shapeId, numPolygons, size, boxSize, cellLocation, countPerBox, boxId, boxesUsed, neighborIndices);
 }
 
@@ -241,13 +280,13 @@ void Model::updateValidAndCounts() {
 }
 
 void Model::updatePolygonGeometry() {
-    updatePolygonGeometryCUDA(size, numPolygons, positions, startIndices, shapeId, next, prev, constraints, areaParts, comParts, areas, comX, comY);
+    updatePolygonGeometryCUDA(size, numPolygons, positions, startIndices, shapeId, next, prev, edgeLengths, areaParts, comParts, areas, comX, comY, maxEdgeLength, constraints, constraintNormSq);
 }
 
-void Model::updatePerimeters() {
-    CUDA_CHECK(cudaMemset(perimeters, 0, numPolygons * sizeof(double)));
-    updatePerimetersCUDA(perimeters, positions, startIndices, numPolygons);
+void Model::projectForce() {
+    projectForceCUDA(size, numPolygons, shapeId, constraints, constraintNormSq, mgsIp, forceProjIp, force);
 }
+
 
 void Model::updateCompactedIntersections() {
     updateCompactedIntersectionsCUDA(size, maxNeighbors, neighbors, inside, shapeId, startIndices, valid, outputIdx, intersections, numIntersections, tu, tuTMP);
@@ -270,14 +309,23 @@ void Model::updateForceEnergy() {
     CUDA_CHECK(cudaMemset(energy, 0, sizeof(double)));
     CUDA_CHECK(cudaDeviceSynchronize());
     switch (simControl.modelType) {
-        case simControlStruct::modelEnum::normal: 
+        case simControlStruct::modelEnum::normal:
             updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
             updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
             updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
-        case simControlStruct::modelEnum::edgeOnly:
-            updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, next, prev, force, energy, stiffness);
+            // do not fall through to softBody
             return;
-        case simControlStruct::modelEnum::abnormal: 
+        case simControlStruct::modelEnum::softBody:
+            updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
+            updateForceEnergyAreaCUDA(size, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
+            return;
+        case simControlStruct::modelEnum::edgeOnly:
+            updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
+            return;
+        case simControlStruct::modelEnum::areaOnly:
+            updateForceEnergyAreaCUDA(size, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
+            return;
+        case simControlStruct::modelEnum::abnormal:
             return;
         default:
             return;
@@ -285,12 +333,7 @@ void Model::updateForceEnergy() {
 }
 
 void Model::updatePositions(double dt) {
-    updatePositionsCUDA(size, positions, constraintForce, dt);
-//    updatePositionsCUDA(size, positions, force, dt);
-}
-
-void Model::updateConstraintForces() {
-    updateConstraintForcesCUDA(size, numPolygons, shapeId, positions, next, prev, startDOF, endDOF, constraints, norm2, &norm2TMP, &norm2TMPStorageBytes, force, proj, constraintForce, areaParts, comParts, startIndices);
+    updatePositionsCUDA(size, positions, force, dt);
 }
 
 // misc
@@ -301,8 +344,8 @@ void Model::resetAreas() {
 // setters
 
 void Model::setMaxEdgeLength(double maxEdgeLength_) {
-    maxEdgeLength = maxEdgeLength_;
-    boxSize = floor(1.0 / maxEdgeLength);
+    boxSize = floor(1.0 / maxEdgeLength_);
+    CUDA_CHECK(cudaMemcpy(maxEdgeLength, &maxEdgeLength_, sizeof(double), cudaMemcpyHostToDevice));
 }
 
 void Model::setModelEnum(simControlStruct::modelEnum modelType_) {
@@ -326,41 +369,30 @@ void Model::setForces(const vector<double>& forcesData) {
 
 void Model::setStartIndices(const vector<int>& startIndicesData) {
     numPolygons = startIndicesData.size() - 1;
-    vector<int> startDOFData, endDOFData;
-    for (int i = 0; i < numPolygons; i++) {
-        startDOFData.push_back(startIndicesData[i] * 2);
-        endDOFData.push_back(startIndicesData[i + 1] * 2);
-    }
     CUDA_CHECK(cudaMalloc((void**)&areas, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&targetAreas, numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&targetEdgeLengths, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&comX, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&comY, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&perimeters, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&proj, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc((void**)&startDOF, (numPolygons) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc((void**)&endDOF, (numPolygons) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc((void**)&norm2, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&norm2TMP, numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(startIndices, startIndicesData.data(), (numPolygons + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(startDOF, startDOFData.data(), numPolygons * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(endDOF, endDOFData.data(), numPolygons * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&shapeStart, numPolygons * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&shapeEnd, numPolygons * sizeof(int)));
-    norm2TMPStorageBytes = 0;
+    CUDA_CHECK(cudaMalloc((void**)&constraintNormSq, 3 * numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&mgsIp,            numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&forceProjIp,      3 * numPolygons * sizeof(double)));
 }
 
 void Model::setNumVertices(int numVertices_) {
     size = numVertices_;
     CUDA_CHECK(cudaMalloc((void**)&positions, 2 * size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&targetEdgeLengths, size * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&edgeLengths, size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&force, size * 2 * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&constraints, size * 2 * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&constraintForce, size * 2 * sizeof(double)));
 }
 
 void Model::setTargetEdgeLengths(const vector<double>& targetEdgeLengthsData) {
-    CUDA_CHECK(cudaMemcpy(targetEdgeLengths, targetEdgeLengthsData.data(), size * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(targetEdgeLengths, targetEdgeLengthsData.data(), numPolygons * sizeof(double), cudaMemcpyHostToDevice));
 }
 
 void Model::setTargetAreas(const vector<double>& targetAreasData) {
@@ -371,12 +403,22 @@ void Model::setStiffness(const double stiffness_) {
     stiffness = stiffness_;
 }
 
+void Model::setCompressibility(const double compressibility_) {
+    compressibility = compressibility_;
+}
+
+double Model::getCompressibility() const {
+    return compressibility;
+}
+
 // getters
 
 string Model::getModelEnum() const {
     switch (simControl.modelType) {
-        case simControlStruct::modelEnum::normal: return "normal";
+        case simControlStruct::modelEnum::normal:   return "normal";
         case simControlStruct::modelEnum::edgeOnly: return "edgeOnly";
+        case simControlStruct::modelEnum::areaOnly: return "areaOnly";
+        case simControlStruct::modelEnum::softBody: return "softBody";
         case simControlStruct::modelEnum::abnormal: return "abnormal";
         default: return std::to_string(static_cast<int>(simControl.modelType));
     }
@@ -418,18 +460,6 @@ vector<double> Model::getForces() const {
     return force_;
 }
 
-vector<double> Model::getNorm2() const {
-    vector<double> norm2_(numPolygons);
-    CUDA_CHECK(cudaMemcpy(norm2_.data(), norm2, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
-    return norm2_;
-}
-
-vector<double> Model::getConstraintForces() const {
-    vector<double> force_(2 * size);
-    CUDA_CHECK(cudaMemcpy(force_.data(), constraintForce, 2 * size * sizeof(double), cudaMemcpyDeviceToHost));
-    return force_;
-}
-
 vector<int> Model::getIntersectionsCounter() const {
     vector<int> intersectionsCounter_(pointDensity * pointDensity);
     CUDA_CHECK(cudaMemcpy(intersectionsCounter_.data(), intersectionsCounter, pointDensity * pointDensity * sizeof(int), cudaMemcpyDeviceToHost));
@@ -437,7 +467,9 @@ vector<int> Model::getIntersectionsCounter() const {
 }
 
 double Model::getMaxEdgeLength() const {
-    return maxEdgeLength;
+    double val = 0.0;
+    CUDA_CHECK(cudaMemcpy(&val, maxEdgeLength, sizeof(double), cudaMemcpyDeviceToHost));
+    return val;
 }
 
 vector<int> Model::getNeighbors() const {
@@ -511,6 +543,12 @@ vector<double> Model::getTargetAreas() const {
     return targetAreas_;
 }
 
+vector<double> Model::getConstraints() const {
+    vector<double> constraints_(size * 6);
+    CUDA_CHECK(cudaMemcpy(constraints_.data(), constraints, size * 6 * sizeof(double), cudaMemcpyDeviceToHost));
+    return constraints_;
+}
+
 vector<double> Model::getCOM() const {
     vector<double> com_(numPolygons * 2);
     CUDA_CHECK(cudaMemcpy(com_.data(), comX, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
@@ -567,12 +605,6 @@ void Model::updateOverlapArea(int pointDensity_) {
     overlapArea /= static_cast<double>(pointDensity * pointDensity);
 }
 
-vector<double> Model::getConstraints() const {
-    vector<double> constraints_(size * 2);
-    CUDA_CHECK(cudaMemcpy(constraints_.data(), constraints, size * 2 * sizeof(double), cudaMemcpyDeviceToHost));
-    return constraints_;
-}
-
 vector<int> Model::getShapeCounts() const {
     vector<int> shapeCounts_(numPolygons);
     CUDA_CHECK(cudaMemcpy(shapeCounts_.data(), shapeCounts, numPolygons * sizeof(int), cudaMemcpyDeviceToHost));
@@ -585,14 +617,6 @@ vector<uint64_t> Model::getIntersections() const {
         CUDA_CHECK(cudaMemcpy(intersections_.data(), intersections, numIntersections * sizeof(uint64_t), cudaMemcpyDeviceToHost));
     }
     return intersections_;
-}
-
-vector<double> Model::getProjection() const {
-    vector<double> proj_(numPolygons);
-    if (numPolygons > 0) {
-        CUDA_CHECK(cudaMemcpy(proj_.data(), proj, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
-    }
-    return proj_;
 }
 
 int Model::getNumIntersections() const {
@@ -608,13 +632,19 @@ vector<uint64_t> Model::getOutersections() const {
 }
 
 vector<double> Model::getTargetEdgeLengths() const {
-    vector<double> targetEdgeLengths_(size);
-    CUDA_CHECK(cudaMemcpy(targetEdgeLengths_.data(), targetEdgeLengths, size * sizeof(double), cudaMemcpyDeviceToHost));
+    vector<double> targetEdgeLengths_(numPolygons);
+    CUDA_CHECK(cudaMemcpy(targetEdgeLengths_.data(), targetEdgeLengths, numPolygons * sizeof(double), cudaMemcpyDeviceToHost));
     return targetEdgeLengths_;
 }
 
 double Model::getMaxUnbalancedForce() const {
-    return getMaxUnbalancedForceCUDA(size, constraintForce);
+    return getMaxUnbalancedForceCUDA(size, force);
+}
+
+vector<double> Model::getEdgeLengths() const {
+    vector<double> edgeLengths_(size);
+    CUDA_CHECK(cudaMemcpy(edgeLengths_.data(), edgeLengths, size * sizeof(double), cudaMemcpyDeviceToHost));
+    return edgeLengths_;
 }
 
 double Model::getOverlapArea() const {

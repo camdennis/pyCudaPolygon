@@ -13,6 +13,7 @@ import glob
 import sys
 from collections import defaultdict
 from tqdm import tqdm
+import warnings
 
 # Load the `polygonMixins` package robustly so imports work whether this
 # module is loaded as a package or directly as a top-level module.
@@ -62,6 +63,10 @@ class model(lpcp.Model, *mixins.values()):
             lpcp.Model.setModelEnum(self, enums.modelEnum.abnormal)
         elif modelType == "edgeOnly":
             lpcp.Model.setModelEnum(self, enums.modelEnum.edgeOnly)
+        elif modelType == "areaOnly":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.areaOnly)
+        elif modelType == "softBody":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.softBody)
         elif modelType == "normal":
             lpcp.Model.setModelEnum(self, enums.modelEnum.normal)
         else:
@@ -179,9 +184,8 @@ class model(lpcp.Model, *mixins.values()):
         targetAreas = np.ones(numPolygons) * minArea
         targetAreas[:mid] /= ratio**2
         self.setTargetAreas(targetAreas)
-        self.resetAreas()
+        #self.resetAreas()
         targetEdgeLengths = kappa * np.sqrt(targetAreas) / nArray
-        targetEdgeLengths = np.repeat(targetEdgeLengths, nArray)
         self.setTargetEdgeLengths(targetEdgeLengths)
         self.updatePolygonGeometry()
 
@@ -193,6 +197,12 @@ class model(lpcp.Model, *mixins.values()):
 
     def setStiffness(self, stiffness):
         lpcp.Model.setStiffness(self, stiffness)
+
+    def setCompressibility(self, compressibility):
+        lpcp.Model.setCompressibility(self, compressibility)
+
+    def getCompressibility(self):
+        return lpcp.Model.getCompressibility(self)
 
     def setPhi(self, phi):
         self.updatePolygonGeometry()
@@ -295,11 +305,6 @@ class model(lpcp.Model, *mixins.values()):
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
 
-    def getConstraints(self):
-        return np.array(lpcp.Model.getConstraints(self))
-
-    def getConstraintForces(self):
-        return np.array(lpcp.Model.getConstraintForces(self))
 
     def getCentersOfMass(self):
         positions = self.getPositions()
@@ -371,101 +376,16 @@ class model(lpcp.Model, *mixins.values()):
 
         return df
 
-    def getProj(self):
-        return np.array(lpcp.Model.getProjection(self))
-
-    def getConstrainedForceTEST(self, force):
-        Q = self.getConstraintMatrixTEST()
-        numVertices = self.getNumVertices()
-        proj = np.identity(numVertices * 2) - np.dot(Q.T, Q)
-        return np.dot(proj, force)
-
-    def MGS(self, constraintMatrix):
-        def normalizeBySpecies(v, speciesMap, numSpecies):
-            newV = v.copy()
-            sp2 = np.zeros(numSpecies)
-            for k in range(v.size):
-                sp2[speciesMap[k // 2]] += v[k]**2
-            for k in range(v.size):
-                newV[k] = v[k] / np.sqrt(sp2[speciesMap[k // 2]])
-            return newV
-
-        def innerProd(v, u, speciesMap, numSpecies):
-            ip = np.zeros(numSpecies)
-            for k in range(v.size):
-                ip[speciesMap[k // 2]] += v[k] * u[k]
-            return ip
-
-        def projection(v, u, ip, speciesMap):
-            for k in range(v.size):
-                v[k] = v[k] - u[k] * ip[speciesMap[k // 2]]
-            return v
-
-        speciesMap = self.getSpeciesMap()
-        numSpecies = np.max(speciesMap) + 1
-        g = constraintMatrix
-        for i in range(0, 4):
-            g[i] = normalizeBySpecies(g[i], speciesMap, numSpecies)
-            for j in range(i + 1, 4):
-                ip = innerProd(g[j], g[i], speciesMap, numSpecies)
-                g[j] = projection(g[j], g[i], ip, speciesMap)
-        return g
-
-    def getConstraintMatrix(self):
+    def getConstraintViolation(self):
+        areas = self.getAreas()
+        edgeLengths = self.getEdgeLengths()
+        targetAreas = self.getTargetAreas()
+        targetEdgeLengths = self.getTargetEdgeLengths()
         shapeId = self.getShapeId()
-        numVertices = self.getNumVertices()
-        gl = np.zeros(2 * numVertices)
-        gl2 = np.zeros(2 * numVertices)
-        positions = self.getPositions()
-        nArray = self.getnArray()
-        ap = np.zeros(nArray.size)
-        da = np.zeros(2 * numVertices)
-        startIndices = self.getStartIndices()
-        for j in range(numVertices):
-            dp1 = positions[j * 2 : j * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp2 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[j * 2 : j * 2 + 2]
-            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp1 += 1.5
-            dp2 += 1.5
-            dp3 += 1.5
-            dp1 %= 1
-            dp2 %= 1
-            dp3 %= 1
-            dp1 -= 0.5
-            dp2 -= 0.5
-            dp3 -= 0.5
-            denom1 = np.sqrt(np.sum(dp1**2))
-            denom2 = np.sqrt(np.sum(dp2**2))
-            gl[j * 2 : j * 2 + 2] = dp1 / denom1 - dp2 / denom2
-            gl2[j * 2 : j * 2 + 2] = 2 * (dp1 - dp2)
-            da[j * 2 : j * 2 + 2] = (np.arange(2) - 0.5) * dp3[::-1]
-            startID = startIndices[shapeId[j]]
-            startPoint = positions[2 * startID : 2 * startID + 2]
-            dpp1 = positions[2 * self.z(j) : 2 * self.z(j) + 2] - startPoint
-            dpp2 = positions[2 * j : 2 * j + 2] - startPoint
-            dpp1 += 1.5
-            dpp2 += 1.5
-            dpp1 %= 1
-            dpp2 %= 1
-            dpp1 -= 0.5
-            dpp2 -= 0.5
-            ap[shapeId[j]] += (dpp1 + dpp2)[1] * dp2[0] / 2
-        #print("ap = ", -ap)
-        ap = np.repeat(ap, nArray)
-        startPoints = np.concatenate((np.array([0]), np.cumsum(nArray)))
-        lVals = np.zeros(numVertices * 2)
-        da2 = np.zeros(2 * numVertices)
-        for j in range(numVertices):
-            dp3 = positions[self.z(j) * 2 : self.z(j) * 2 + 2] - positions[self.zp(j) * 2 : self.zp(j) * 2 + 2]
-            dp3 += 1.5
-            dp3 %= 1
-            dp3 -= 0.5
-            da2[j * 2 : j * 2 +  2] = (np.arange(2) - 0.5) * dp3[::-1] * ap[j]
-        # Now we orthonormalize
-        dg = np.array(np.vstack((gl, gl2, da, da2)))
-        Q, _ = np.linalg.qr(dg.T)
-        return Q.T
-        return self.MGS(dg)
+        return np.sqrt(np.mean((1 - areas / targetAreas)**2)), np.sqrt(np.mean((1 - edgeLengths / targetEdgeLengths[shapeId])**2))
+
+    def getConstraints(self):
+        return np.array(lpcp.Model.getConstraints(self))
 
     def getAreas(self):
         # This is MC for now
@@ -473,6 +393,12 @@ class model(lpcp.Model, *mixins.values()):
 
     def getTargetEdgeLengths(self):
         return np.array(lpcp.Model.getTargetEdgeLengths(self))
+
+    def getTargetAreas(self):
+        return np.array(lpcp.Model.getTargetAreas(self))
+
+    def getEdgeLengths(self):
+        return np.array(lpcp.Model.getEdgeLengths(self))
 
     def getCOM(self):
         return np.array(lpcp.Model.getCOM(self))
@@ -508,6 +434,9 @@ class model(lpcp.Model, *mixins.values()):
         # This is MC
         lpcp.Model.updatePolygonGeometry(self)
 
+    def projectForce(self):
+        lpcp.Model.projectForce(self)
+
     def updateNeighborCells(self):
         lpcp.Model.updateNeighborCells(self)
         
@@ -517,8 +446,6 @@ class model(lpcp.Model, *mixins.values()):
     def updatePositions(self, dt):
         lpcp.Model.updatePositions(self, dt)
 
-    def updateConstraintForces(self):
-        lpcp.Model.updateConstraintForces(self)
 
     def resetAreas(self):
         lpcp.Model.resetAreas(self)
@@ -560,48 +487,66 @@ class model(lpcp.Model, *mixins.values()):
 
     # misc
 
-    def getNorm2(self):
-        return np.array(lpcp.Model.getNorm2(self))
 
-    def minimizeGDStep(self, a = 0.01, dt = 1e-3, addedForce = None):
-        try:
+    def minimizeGDStep(self, dt = 1e-3, addedForce = None, dontMove = False, maxDisplacement = 0.05):
+        if self.getModelEnum() not in ("edgeOnly", "areaOnly", "softBody"):
             self.updateNeighborCells()
             self.updateNeighbors()
             self.updateOutersections()
-            self.updateForceEnergy()
-            self.updateConstraintForces()
-            self.updatePolygonGeometry()
-            if (self.getMaxUnbalancedForce() > 10):
-                print("here")
-                return 0 
-            self.updatePositions(dt)
-            self.updatePolygonGeometry()
-            self.resetAreas()
-            self.updatePolygonGeometry()
-            #overlapArea = self.getEnergy()
-            #force = self.getForces()
-        except:
-            raise Exception("Something went wrong with updating the force and energy")
-        #positions = self.getPositions()
-        #positions += dt * force
-        #positions += 1.0
-        #positions %= 1.0
-        #self.setPositions(positions)
-#        print(self.getEnergy(), self.getMaxUnbalancedForce())
+        self.updatePolygonGeometry()
+        self.updateForceEnergy()
+        if addedForce is not None:
+            self.setForces(self.getForces() + addedForce)
+        if (self.getMaxUnbalancedForce() * dt > maxDisplacement):
+            return -1
+        if self.getModelEnum() == "normal":
+            self.projectForce()
+        if dontMove:
+            return self.getEnergy()
+        self.updatePositions(dt)
+        self.updatePolygonGeometry()
         return self.getEnergy()
 
-    def minimizeGD(self, a = 0.01, dt = 1e-3, maxSteps = 100, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1, overwriteCheckpoint = False):
-        with tqdm(total = maxSteps, desc = "Processing", disable = (not progressBar)) as pbar:
-            for step in range(maxSteps):
+    def minimizeGD(self, maxUnbalancedForceThreshold = 1e-14, dt = 1e-3, maxSteps = -1, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1, overwriteCheckpoint = False, maxDisplacement = 0.5, maxConstraintViolationThreshold = 1e-3):
+        if maxSteps == -1 and maxUnbalancedForceThreshold is None:
+            raise ValueError("maxSteps=-1 requires maxUnbalancedForceThreshold to be set")
+        dontMove = False
+        if maxSteps == 0:
+            maxSteps = 1
+            dontMove = True
+
+        total = maxSteps if maxSteps != -1 else None
+        with tqdm(total = total, desc = "Processing", disable = (not progressBar)) as pbar:
+            successes = 0
+            prevEnergy = None
+            step = 0
+            energy = None
+            while maxSteps == -1 or step < maxSteps:
                 if checkpointDir is not None and (step % checkpointFreq == 0):
                     if not os.path.isdir(checkpointDir):
                         os.makedirs(checkpointDir)
                     self.saveModel(checkpointDir + "/" + str(step), overwrite = overwriteCheckpoint)
                 if progressBar:
                     pbar.update(1)
-                if (self.minimizeGDStep(addedForce = addedForce, dt = dt) == 0):
-                    return 0
-
+                energy = self.minimizeGDStep(addedForce = addedForce, dt = dt, dontMove = dontMove, maxDisplacement = maxDisplacement)
+                if maxUnbalancedForceThreshold is not None and self.getMaxUnbalancedForce() <= maxUnbalancedForceThreshold:
+                    return energy
+                if (self.getModelEnum() == "normal"  and np.max(self.getConstraintViolation()) > maxConstraintViolationThreshold):
+                    return energy
+                if prevEnergy is not None and (energy > prevEnergy or energy == -1):
+                    dt = max(1e-16, dt / 2.1)
+                    successes = 0
+                else:
+                    successes += 1
+                    prevEnergy = energy
+                if successes > 5:
+                    successes = 0
+                    dt = min(1, dt * 1.9)
+                step += 1
+        if energy is None:
+            raise Exception("This is not an appropriate maximum step size. Reset maxSteps.")
+        return energy
+                
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):
             raise Exception("Packing exists. Not saving. To save over this file, set kwarg overwrite = True")

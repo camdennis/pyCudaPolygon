@@ -41,6 +41,8 @@ public:
     void setTargetEdgeLengths(const vector<double>& targetEdgeLengths_);
     void setTargetAreas(const vector<double>& targetAreas_);
     void setStiffness(const double stiffness_);
+    void setCompressibility(const double compressibility_);
+    double getCompressibility() const;
 
     // getters
 
@@ -70,23 +72,21 @@ public:
     vector<uint64_t> getOutersections() const;
     unsigned long long getRandomSeed();
     vector<double> getAreas() const;
-    vector<double> getNorm2() const;
     double getEnergy() const;
     vector<double> getTargetEdgeLengths() const;
     vector<double> getTargetAreas() const;
     vector<double> getCOM() const;
-    vector<double> getConstraintForces() const;
     double getMaxUnbalancedForce() const;
-    vector<double> getConstraints() const;
-    vector<double> getProjection() const;
+    vector<double> getEdgeLengths() const;
     double getOverlapArea() const;
+    vector<double> getConstraints() const;
 
     // updaters
 
     void updatePolygonGeometry();
+    void projectForce();
     void updateNeighborCells();
     void updateNeighbors();
-    void updatePerimeters();
     void updateOverlapArea(int pointDensity_);
     void updateIntersectionsCounter();
     void updateValidAndCounts();
@@ -94,7 +94,6 @@ public:
     void updateCompactedIntersections();
     void updateForceEnergy();
     void updatePositions(double dt);
-    void updateConstraintForces();
 
     // misc:
     void resetAreas();
@@ -107,8 +106,6 @@ private:
     double* energy;
     double* positions;
     int* startIndices;
-    int* startDOF;
-    int* endDOF;
     double* areas;
     double* targetEdgeLengths;
     int* countPerBox;
@@ -122,7 +119,7 @@ private:
     int boxSize;
     int* numNeighbors;
     bool updateMaxNeighbors = false;
-    double maxEdgeLength;
+    double* maxEdgeLength;
     double* force;
     int* maxActualNeighbors;
     bool* inside;
@@ -139,20 +136,20 @@ private:
     uint64_t* outersections, *outersectionsTMP;
     uint32_t* keys;
     int* next, *prev;
-    double stiffness;
+    double stiffness = 0.0;
+    double compressibility = 0.0;
     int* shapeStart;
     int* shapeEnd;
-    double* constraints, *constraintsTMP;
-    double* norm2, *norm2TMP;
-    size_t norm2TMPStorageBytes = 0;
-    double* proj;
-    double* constraintForce;
-    double maxUnbalancedForce;
+    double* edgeLengths;
     double* comX;
     double* comY;
     double* comParts;
     double* areaParts;
     double* targetAreas;
+    double* constraints;
+    double* constraintNormSq;
+    double* mgsIp;
+    double* forceProjIp;
 };
 
 #endif

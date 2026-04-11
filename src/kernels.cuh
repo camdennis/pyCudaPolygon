@@ -290,23 +290,95 @@ __global__ void updateAreasCOMKernel(double* areas, double* positions, int* star
     }
 }
 
-__global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* constraints, double* areaParts, double* comParts) {
+__global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* constraints, double* constraintNormSq) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
     int k = idx / 2;
     int alpha = idx % 2;
     int startIndex = startIndices[shapeId[k]];
-    // g = (2 alpha - 1) * (positions[prev] - positions[next])
-    double c = (2 * alpha - 1) * wrap(positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
-    constraints[idx] = c;
 
     double x1 = wrap(positions[idx] - positions[startIndex * 2 + alpha]);
-    double x2 = wrap(positions[next[k] * 2 + alpha] - positions[startIndex * 2 + alpha]);
+    double x4 = wrap(positions[prev[k] * 2 + 1 - alpha] - positions[next[k] * 2 + 1 - alpha]);
+    double dxPrev = wrap(positions[2 * k] - positions[prev[k] * 2]);
+    double dyPrev = wrap(positions[2 * k + 1] - positions[prev[k] * 2 + 1]);
+    double dxNext = wrap(positions[2 * k] - positions[next[k] * 2]);
+    double dyNext = wrap(positions[2 * k + 1] - positions[next[k] * 2 + 1]);
     comParts[k + numVertices * alpha] = x1;
+
+    double lenSqPrev = dxPrev * dxPrev + dyPrev * dyPrev;
+    double lenSqNext = dxNext * dxNext + dyNext * dyNext;
+
+    double areaComp  = (2 * alpha - 1) * x4;
+    double edge2Comp = alpha ? (dyNext + dyPrev) : (dxNext + dxPrev);
+    double edge4Comp = alpha ? (lenSqPrev * dyPrev + lenSqNext * dyNext) : (lenSqPrev * dxPrev + lenSqNext * dxNext);
+
+    constraints[6 * k + alpha] = areaComp;
+    constraints[6 * k + 2 + alpha] = edge2Comp;
+    constraints[6 * k + 4 + alpha] = edge4Comp;
+
+    int p = shapeId[k];
+    atomicAdd(&constraintNormSq[3 * p + 0], areaComp * areaComp);
+    atomicAdd(&constraintNormSq[3 * p + 1], edge2Comp * edge2Comp);
+    atomicAdd(&constraintNormSq[3 * p + 2], edge4Comp * edge4Comp);
+
     if (alpha) return;
-    double dy = wrap(positions[next[k] * 2 + 1] - positions[idx + 1]);
-    areaParts[k] = dy * (x2 + x1) / 2.0;
+    double dx = wrap(positions[2 * next[k]] - positions[2 * k]);
+    double dy = wrap(positions[2 * next[k] + 1] - positions[2 * k + 1]);
+    edgeLengths[k] = sqrt(dx * dx + dy * dy);
+    double dy2 = wrap(positions[next[k] * 2 + 1] - positions[idx + 1]);
+    double x2 = wrap(positions[next[k] * 2 + alpha] - positions[startIndex * 2 + alpha]);
+    areaParts[k] = dy2 * (x2 + x1) / 2.0;
 }
+
+__global__ void normalizeConstraintsKernel(int numVertices, int* shapeId, double* constraints, const double* constraintNormSq) {
+    int idx   = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k     = idx / 2;
+    int alpha = idx % 2;
+    int p     = shapeId[k];
+    for (int c = 0; c < 3; c++) {
+        double ns = constraintNormSq[3 * p + c];
+        if (ns > 0.0) constraints[6 * k + 2 * c + alpha] /= sqrt(ns);
+    }
+}
+
+__global__ void mgsInnerProductKernel(int numVertices, int* shapeId, const double* constraints, double* ip, int cA, int cB) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    atomicAdd(&ip[shapeId[k]], constraints[6 * k + 2 * cA + alpha] * constraints[6 * k + 2 * cB + alpha]);
+}
+
+__global__ void mgsSubtractKernel(int numVertices, int* shapeId, double* constraints, const double* ip, double* normSq, int cA, int cB) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    int p = shapeId[k];
+    double val = constraints[6 * k + 2 * cB + alpha] - ip[p] * constraints[6 * k + 2 * cA + alpha];
+    constraints[6 * k + 2 * cB + alpha] = val;
+    atomicAdd(&normSq[3 * p + cB], val * val);
+}
+
+__global__ void forceInnerProductKernel(int numVertices, int* shapeId, const double* constraints, const double* force, double* fp) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    int p = shapeId[k];
+    for (int c = 0; c < 3; c++) atomicAdd(&fp[3 * p + c], constraints[6 * k + 2 * c + alpha] * force[idx]);
+}
+
+__global__ void forceProjectionKernel(int numVertices, int* shapeId, const double* constraints, double* force, const double* fp) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    int k = idx / 2;
+    int alpha = idx % 2;
+    int p = shapeId[k];
+    for (int c = 0; c < 3; c++) force[idx] -= fp[3 * p + c] * constraints[6 * k + 2 * c + alpha];
+}
+
 
 __global__ void normalizeKernel(int numPolygons, double* comX, double* comY, double* positions, int* startIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -323,39 +395,6 @@ __global__ void normalizeKernel(int numPolygons, double* comX, double* comY, dou
     comy += positions[2 * startIdx + 1];
     comy -= floor(comy);
     comY[i] = comy;
-}
-
-__global__ void updatePerimetersKernel(double* perimeters, double* positions, int* startIndices, int numPolygons) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < numPolygons) {
-        int start = startIndices[idx];
-        int end = startIndices[idx + 1];
-        double dx, dy;
-        for (int i = start; i < end - 1; i++) {
-            dx = (positions[2 * i] - positions[2 * i + 2] + 0.5);
-            while (dx < 0.0) {
-                dx += 1;
-            }
-            while (dx > 1.0) {
-                dx -= 1.0;
-            }
-            dx -= 0.5;
-            dy = (positions[2 * i + 1] - positions[2 * i + 3] + 0.5);
-            while (dy < 0.0) dy += 1.0;
-            while (dy > 1.0) dy -= 1.0;
-            perimeters[idx] += sqrt(dx * dx + dy * dy);
-        }
-        // closing edge: (end-1) -> start
-        dx = (positions[2 * end - 2] - positions[2 * start] + 0.5);
-        while (dx < 0.0) dx += 1.0;
-        while (dx > 1.0) dx -= 1.0;
-        dx -= 0.5;
-        dy = (positions[2 * end - 1] - positions[2 * start + 1] + 0.5);
-        while (dy < 0.0) dy += 1.0;
-        while (dy > 1.0) dy -= 1.0;
-        dy -= 0.5;
-        perimeters[idx] += sqrt(dx * dx + dy * dy);
-    }
 }
 
 __global__ void updateShapeIdKernel(int* shapeId, int* startIndices, int numPolygons) {
@@ -406,9 +445,12 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         while (y >= 1.0) {
             y -= 1.0;
         }
-        x = floor(x * boxSize);
-        y = floor(y * boxSize);
-        cellLocation[idx] = int(y) * boxSize + int(x);
+        int ix = (int)floor(x * boxSize);
+        int iy = (int)floor(y * boxSize);
+        // Clamp: NaN/Inf positions produce INT_MIN from (int); clamp to valid cell range.
+        if (ix < 0) ix = 0; else if (ix >= boxSize) ix = boxSize - 1;
+        if (iy < 0) iy = 0; else if (iy >= boxSize) iy = boxSize - 1;
+        cellLocation[idx] = iy * boxSize + ix;
     }
 }
 
@@ -999,16 +1041,18 @@ __global__ void updateShapeRangesKernel(const uint64_t* intersections, int numIn
     atomicMax(&shapeEnd[s], idx);
 }
 
-__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int m = blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= numVertices) return;
     // get the edge ids
     int prv = prev[m];
     int nxt = next[m];
-    double l0 = targetEdgeLengths[m];
-    double l0prv = targetEdgeLengths[prv];
+    double l0 = targetEdgeLengths[shapeId[m]];
+    double l0prv = targetEdgeLengths[shapeId[prv]];
 
-    double l, prvl;
+    // use pre-computed edge lengths from updatePolygonGeometryKernel
+    double l = edgeLengths[m];
+    double prvl = edgeLengths[prv];
 
     double2 dvmzm, dvzpmm;
     dvmzm.x = positions[2 * m] - positions[2 * nxt];
@@ -1021,26 +1065,25 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     dvzpmm.x += 1.5;
     dvzpmm.y += 1.5;
 
-
-    while (dvmzm.x  >= 1.0) dvmzm.x  -= 1.0;
-    while (dvmzm.y  >= 1.0) dvmzm.y  -= 1.0;
+    while (dvmzm.x  >= 1.0) dvmzm.x -= 1.0;
+    while (dvmzm.y  >= 1.0) dvmzm.y -= 1.0;
     while (dvzpmm.x >= 1.0) dvzpmm.x -= 1.0;
     while (dvzpmm.y >= 1.0) dvzpmm.y -= 1.0;
 
-    dvmzm.x  -= 0.5;
-    dvmzm.y  -= 0.5;
+    dvmzm.x -= 0.5;
+    dvmzm.y -= 0.5;
     dvzpmm.x -= 0.5;
     dvzpmm.y -= 0.5;
 
-    l = sqrt(dvmzm.x * dvmzm.x + dvmzm.y * dvmzm.y);
-    prvl = sqrt(dvzpmm.x * dvzpmm.x + dvzpmm.y * dvzpmm.y);
-    double coeff1 = 1 - l0 / l;
-    double coeff2 = 1 - l0prv / prvl;
+    // energy: stiffness * (1 - l/l0)^2
+    // dE/dr_m = stiffness * 2*(1-l/l0) * (-1/l0) * (-dvmzm/l)
+    //         = stiffness * 2*(1-l/l0) / (l0*l) * dvmzm
+    // force = -dE/dr_m  => coeff * dvmzm where coeff = -2*(1-l/l0)/(l0*l)
+    double coeff1 = (l > 1e-14) ? (1.0 - l0 / l) : 0.0;
+    double coeff2 = (prvl > 1e-14) ? (1.0 - l0prv / prvl) : 0.0;
 
-    double localEnergy;
+    double localEnergy = stiffness * (l - l0) * (l - l0) / 2.0;
     double2 localForceM;
-
-    localEnergy = (stiffness / 2) * (l - l0) * (l - l0);
     localForceM.x = -(coeff1 * dvmzm.x - coeff2 * dvzpmm.x) * stiffness;
     localForceM.y = -(coeff1 * dvmzm.y - coeff2 * dvzpmm.y) * stiffness;
 
@@ -1048,6 +1091,23 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     if (localForceM.x != 0.0 || localForceM.y != 0.0) {
         atomicAdd(&force[2 * m], localForceM.x);
         atomicAdd(&force[2 * m + 1], localForceM.y);
+    }
+}
+
+__global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= numVertices) return;
+    int s = shapeId[m];
+    double A  = areas[s];
+    double A0 = targetAreas[s];
+    if (A0 < 1e-14) return;
+    double coeff = 0.5 * compressibility * (A - A0);
+    double fx = -coeff * wrap(positions[2 * next[m] + 1] - positions[2 * prev[m] + 1]);
+    double fy = -coeff * wrap(positions[2 * prev[m]] - positions[2 * next[m]]);
+    atomicAdd(&force[2 * m], fx);
+    atomicAdd(&force[2 * m + 1], fy);
+    if (startIndices[s] == m) {
+        atomicAdd(energy, compressibility * (A - A0) * (A - A0) / 2.0);
     }
 }
 
@@ -1129,47 +1189,19 @@ __global__ void updatePositionsKernel(int numVertices, double* positions, const 
     positions[idx] = p - floor(p);
 }
 
-__global__ void updateConstraintsKernel(int numVertices, double* positions, int* next, int* prev, double* constraints) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numVertices * 2) return;
-    int k = idx / 2;
-    int alpha = idx % 2;
-    // g = (2 alpha - 1) * (positions[prev] - positions[next])
-    double c = (2 * alpha - 1) * (positions[2 * prev[k] + 1 - alpha] - positions[2 * next[k] + 1 - alpha]);
-    c += 1.5;
-    while (c >= 1.0) c -= 1.0;
-    c -= 0.5;
-    constraints[idx] = c;
-}
-
-__global__ void updateProjectionKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* norm2, double* force, double* proj) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numVertices * 2) return;
-    // which polygon, sir?
-    int s = shapeId[idx / 2];
-    if (norm2[s] > 1e-14) {
-        double val = force[idx] * constraints[idx] / norm2[s];
-        atomicAdd(&proj[s], val);
-    }
-}
-
-__global__ void updateConstraintForcesKernel(int numVertices, int numPolygons, int* shapeId, double* constraints, double* force, double* proj, double* constraintForce) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numVertices * 2) return;
-    int s = shapeId[idx / 2];
-    constraintForce[idx] = force[idx] - proj[s] * constraints[idx];
-}
 
 //misc
 
 __global__ void resetAreasKernel(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numVertices * 2) return;    
+    if (idx >= numVertices * 2) return;
     // which polygon, sir?
     double x = positions[idx];
     int s = shapeId[idx / 2];
     double currentArea = areas[s];
     double targetArea = targetAreas[s];
+    // Guard: degenerate polygon (area <= 0 or NaN) → skip rescaling to prevent NaN propagation
+    if (!(currentArea > 0.0)) return;
     double rescale = sqrt(targetArea / currentArea);
     double u = (idx % 2) ? wrap(x - comY[s]) : wrap(x - comX[s]);
     u *= rescale;

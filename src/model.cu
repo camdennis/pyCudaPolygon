@@ -27,6 +27,7 @@ extern "C" void initializeRandomStates(curandState *globalState, unsigned long l
 // helpers
 
 extern "C" void applyPermutationCUDA_float2(const float2* d_input, const uint32_t* d_perm, float2* d_output, int numItems) {
+    if (numItems == 0) return;
     int threads = 256;
     int blocks = (numItems + threads - 1) / threads;
     gatherKernel_float2<<<blocks, threads>>>(d_input, d_perm, d_output, numItems);
@@ -35,6 +36,7 @@ extern "C" void applyPermutationCUDA_float2(const float2* d_input, const uint32_
 }
 
 extern "C" void applyPermutationCUDA_int64(const uint64_t* d_input, const uint32_t* d_perm, uint64_t* d_output, int numItems) {
+    if (numItems == 0) return;
     int threads = 256;
     int blocks = (numItems + threads - 1) / threads;
     gatherKernel_int64<<<blocks, threads>>>(d_input, d_perm, d_output, numItems);
@@ -43,6 +45,7 @@ extern "C" void applyPermutationCUDA_int64(const uint64_t* d_input, const uint32
 }
 
 extern "C" void sortKeysCUDA(uint64_t* d_keys, int numItems, int beginBit, int endBit, uint32_t* d_perm_out) {
+    if (numItems == 0) return;
     uint32_t* d_indices_in = nullptr;
     CUDA_CHECK(cudaMalloc(&d_indices_in, numItems * sizeof(uint32_t)));
 
@@ -104,55 +107,23 @@ double maxAbsValue(double* d_data, int n) {
 
 // updaters
 
-extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* constraints, double* areaParts, double* comParts, double* area, double* comX, double* comY) {
+extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* area, double* comX, double* comY, double* maxEdgeLength, double* constraints, double* constraintNormSq) {
     int numBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
-    updatePolygonGeometryKernel<<<numBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, constraints, areaParts, comParts);
+    // zero per-polygon squared-norm accumulators before the geometry kernel fills them
+    CUDA_CHECK(cudaMemset(constraintNormSq, 0, 3 * numPolygons * sizeof(double)));
+    updatePolygonGeometryKernel<<<numBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, edgeLengths, areaParts, comParts, constraints, constraintNormSq);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
-    // CUB reduce: sum all values in areaParts using startIndices as a divider.
-    // startIndices has numPolygons + 1 entries where the first is 0 and the last is
-    // numVertices.
-    // We want areas[i] to be the sum of the entries
-    // between startIndices[i] and startIndices[i + 1] for polygon i
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
 
-    // temp storage query
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
-        d_temp_storage, temp_storage_bytes,
-        areaParts,            // input
-        area,                 // output (numPolygons)
-        numPolygons,
-        startIndices,         // segment starts
-        startIndices + 1      // segment ends
-    ));
-
-    // allocate
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(d_temp_storage, temp_storage_bytes, areaParts, area, numPolygons, startIndices, startIndices + 1));
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
-    // run
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
-        d_temp_storage, temp_storage_bytes,
-        areaParts,
-        area,
-        numPolygons,
-        startIndices,
-        startIndices + 1
-    ));
-    // CUB reduce: do the same exact thing with comParts and this will give you
-    // entries for com.
-    // com[i] is the x component of the centroid of polygon i if i is less than the number of polygons
-    // com[numPolygons + i] is the y component of the centroid of polygon i
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(d_temp_storage, temp_storage_bytes, areaParts, area, numPolygons, startIndices, startIndices + 1));
 
-    // reuse temp storage if large enough
     size_t temp_storage_bytes2 = 0;
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
-        nullptr, temp_storage_bytes2,
-        comParts, comX,
-        numPolygons,
-        startIndices,
-        startIndices + 1
-    ));
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(nullptr, temp_storage_bytes2, comParts, comX, numPolygons, startIndices, startIndices + 1));
 
     // resize if needed
     if (temp_storage_bytes2 > temp_storage_bytes) {
@@ -161,37 +132,78 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
         temp_storage_bytes = temp_storage_bytes2;
     }
 
-    // X reduction
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
-        d_temp_storage, temp_storage_bytes,
-        comParts,
-        comX,
-        numPolygons,
-        startIndices,
-        startIndices + 1
-    ));
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(d_temp_storage, temp_storage_bytes, comParts, comX, numPolygons, startIndices, startIndices + 1));
 
-    // Y reduction
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(
-        d_temp_storage, temp_storage_bytes,
-        comParts + numVertices,
-        comY,
-        numPolygons,
-        startIndices,
-        startIndices + 1
-    ));
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(d_temp_storage, temp_storage_bytes, comParts + numVertices, comY, numPolygons, startIndices, startIndices + 1));
+
+    // max edge length reduce
+    size_t temp_bytes_max = 0;
+    CUDA_CHECK(cub::DeviceReduce::Max(nullptr, temp_bytes_max, edgeLengths, maxEdgeLength, numVertices));
+    if (temp_bytes_max > temp_storage_bytes) {
+        CUDA_CHECK(cudaFree(d_temp_storage));
+        CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_bytes_max));
+        temp_storage_bytes = temp_bytes_max;
+    }
+    CUDA_CHECK(cub::DeviceReduce::Max(d_temp_storage, temp_bytes_max, edgeLengths, maxEdgeLength, numVertices));
+
     CUDA_CHECK(cudaDeviceSynchronize());
 
     normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, comX, comY, positions, startIndices);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    normalizeConstraintsKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, constraintNormSq);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updatePerimetersCUDA(double* perimeters, double* positions, int* startIndices, int numPolygons) {
-    int numBlocks = (numPolygons + blockSize - 1) / blockSize;
-    updatePerimetersKernel<<<numBlocks, blockSize>>>(perimeters, positions, startIndices, numPolygons);
+extern "C" void projectForceCUDA(int numVertices, int numPolygons, int* shapeId, double* constraints, double* constraintNormSq, double* ip, double* fp, double* force) {
+    int numBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
+
+    CUDA_CHECK(cudaMemset(ip, 0, numPolygons * sizeof(double)));
+    mgsInnerProductKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, 0, 1);
     CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemset(constraintNormSq, 0, 3 * numPolygons * sizeof(double)));
+    mgsSubtractKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, constraintNormSq, 0, 1);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // renormalize c1 (slot 1 is non-zero; slots 0 and 2 are zero so skipped)
+    normalizeConstraintsKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, constraintNormSq);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemset(ip, 0, numPolygons * sizeof(double)));
+    mgsInnerProductKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, 0, 2);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemset(constraintNormSq, 0, 3 * numPolygons * sizeof(double)));
+    mgsSubtractKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, constraintNormSq, 0, 2);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemset(ip, 0, numPolygons * sizeof(double)));
+    mgsInnerProductKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, 1, 2);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemset(constraintNormSq, 0, 3 * numPolygons * sizeof(double)));
+    mgsSubtractKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, ip, constraintNormSq, 1, 2);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    normalizeConstraintsKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, constraintNormSq);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemset(fp, 0, 3 * numPolygons * sizeof(double)));
+    forceInnerProductKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, force, fp);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    forceProjectionKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, force, fp);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
+
 
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices) {
     int numBlocks = (size + blockSize - 1) / blockSize;
@@ -405,9 +417,7 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const flo
 }
 
 extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy) {
-    if (numIntersections <= 0) {
-        return;
-    }
+    if (numIntersections <= 0) return;
     int threads = 256;
     int blocks = (numIntersections + threads - 1) / threads;
     size_t smem = threads * sizeof(double);
@@ -423,6 +433,7 @@ extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numI
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
     // Find actual ranges using atomicMin/Max
+    if (numIntersections == 0) return;
     int blocks = (numIntersections + blockSize - 1) / blockSize;
     updateShapeRangesKernel<<<blocks, blockSize>>>(intersections, numIntersections, shapeStart, shapeEnd);
     CUDA_CHECK_KERNEL();
@@ -439,10 +450,18 @@ extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersecti
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const int* next, const int* prev, double* force, double* energy, double stiffness) {
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
-    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, targetEdgeLengths, next, prev, force, energy, stiffness);
+    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" void updateForceEnergyAreaCUDA(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
+    int threads = 256;
+    int grid = (numVertices + threads - 1) / threads;
+    updateForceEnergyAreaKernel<<<grid, threads>>>(numVertices, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -454,41 +473,10 @@ extern "C" void updatePositionsCUDA(int numVertices, double* positions, const do
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateConstraintForcesCUDA(int numVertices, int numPolygons, int* shapeId, double* positions, int* next, int* prev, int* startDOF, int* endDOF, double* constraints, double* norm2, double** norm2TMP, size_t* norm2TMPStorageBytes, double* force, double* proj, double* constraintForce, double* areaParts, double* comParts, int* startIndices) {
-    int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
-    updatePolygonGeometryKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, constraints, areaParts, comParts);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cub::TransformInputIterator<double, Square, double*> squaredConstraints(constraints, Square{});
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    size_t requiredBytes = 0;
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(nullptr, requiredBytes, squaredConstraints, norm2, numPolygons, startDOF, endDOF));
-    if (requiredBytes > *norm2TMPStorageBytes) {
-        if (*norm2TMP) CUDA_CHECK_NOABORT(cudaFree(*norm2TMP));
-        CUDA_CHECK(cudaMalloc(norm2TMP, requiredBytes));
-        *norm2TMPStorageBytes = requiredBytes;
-    }
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(*norm2TMP, *norm2TMPStorageBytes, squaredConstraints, norm2, numPolygons, startDOF, endDOF));
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    CUDA_CHECK(cudaMemset(proj, 0, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    updateProjectionKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, shapeId, constraints, norm2, force, proj);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    updateConstraintForcesKernel<<<initBlocks, blockSize>>>(numVertices, numPolygons, shapeId, constraints, force, proj, constraintForce);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
 // getters
 
-extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* constraintForce) {
-    return maxAbsValue(constraintForce, numVertices * 2);
+extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force) {
+    return maxAbsValue(force, numVertices * 2);
 }
 
 // misc

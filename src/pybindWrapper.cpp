@@ -11,8 +11,10 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(libpyCudaPolygon, m) {
     pybind11::enum_<simControlStruct::modelEnum>(m, "modelEnum")
-        .value("normal", simControlStruct::modelEnum::normal)
+        .value("normal",   simControlStruct::modelEnum::normal)
         .value("edgeOnly", simControlStruct::modelEnum::edgeOnly)
+        .value("areaOnly", simControlStruct::modelEnum::areaOnly)
+        .value("softBody", simControlStruct::modelEnum::softBody)
         .value("abnormal", simControlStruct::modelEnum::abnormal);
 
     py::class_<Model>(m, "Model")
@@ -38,11 +40,13 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setTargetEdgeLengths", &Model::setTargetEdgeLengths)
         .def("setTargetAreas", &Model::setTargetAreas)
         .def("setStiffness", &Model::setStiffness)
+        .def("setCompressibility", &Model::setCompressibility)
+        .def("getCompressibility", &Model::getCompressibility)
         // updaters
 
         .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
-        .def("updatePerimeters", &Model::updatePerimeters)
-        .def("updateNeighborCells", &Model::updateNeighborCells)
+        .def("projectForce", &Model::projectForce)
+.def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("updateValidAndCounts", &Model::updateValidAndCounts)
         .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
@@ -50,7 +54,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("updateOverlapArea", &Model::updateOverlapArea)
         .def("updateForceEnergy", &Model::updateForceEnergy)
         .def("updatePositions", &Model::updatePositions)
-        .def("updateConstraintForces", &Model::updateConstraintForces)
 
         // misc
         .def("resetAreas", &Model:: resetAreas)
@@ -82,11 +85,10 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getShapeCounts", &Model::getShapeCounts)
         .def("getForces", &Model::getForces)
         .def("getEnergy", &Model::getEnergy)
-        .def("getTargetEdgeLengths", &Model::getTargetEdgeLengths)
-        .def("getConstraintForces", &Model::getConstraintForces)
-        .def("getNorm2", &Model::getNorm2)
         .def("getConstraints", &Model::getConstraints)
-        .def("getProjection", &Model::getProjection)
+        .def("getTargetEdgeLengths", &Model::getTargetEdgeLengths)
+        .def("getTargetAreas", &Model::getTargetAreas)
+        .def("getEdgeLengths", &Model::getEdgeLengths)
         .def("getMaxUnbalancedForce", &Model::getMaxUnbalancedForce)
         .def("getCOM", &Model::getCOM)
         .def("getOverlapArea", &Model::getOverlapArea);
