@@ -206,7 +206,7 @@ class model(lpcp.Model, *mixins.values()):
 
     def setPhi(self, phi):
         self.updatePolygonGeometry()
-        targetAreas = self.getAreas()
+        targetAreas = self.getTargetAreas()
         areaRatio = phi / np.sum(targetAreas)
         lengthRatio = np.sqrt(areaRatio)
         targetAreas *= areaRatio
@@ -382,7 +382,14 @@ class model(lpcp.Model, *mixins.values()):
         targetAreas = self.getTargetAreas()
         targetEdgeLengths = self.getTargetEdgeLengths()
         shapeId = self.getShapeId()
-        return np.sqrt(np.mean((1 - areas / targetAreas)**2)), np.sqrt(np.mean((1 - edgeLengths / targetEdgeLengths[shapeId])**2))
+        rmsAreaViolation = np.sqrt(np.mean((1 - areas / targetAreas)**2))
+        nArray = self.getnArray()
+        idx = np.repeat(np.arange(len(nArray)), nArray)
+        perimeters = np.bincount(idx, weights = edgeLengths)
+        targetPerimeters = nArray * targetEdgeLengths
+        rmsPerimeterViolation = np.sqrt(np.mean((1 - perimeters / targetPerimeters)**2))
+        rmsEdgeViolation = np.sqrt(np.mean((1 - edgeLengths / np.repeat(targetEdgeLengths, nArray))**2))
+        return np.array([rmsAreaViolation, rmsEdgeViolation, rmsPerimeterViolation])
 
     def getConstraints(self):
         return np.array(lpcp.Model.getConstraints(self))

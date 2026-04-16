@@ -369,26 +369,41 @@ void Model::setForces(const vector<double>& forcesData) {
 
 void Model::setStartIndices(const vector<int>& startIndicesData) {
     numPolygons = startIndicesData.size() - 1;
-    CUDA_CHECK(cudaMalloc((void**)&areas, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&targetAreas, numPolygons * sizeof(double)));
+    if (areas)             { CUDA_CHECK(cudaFree(areas));             areas             = nullptr; }
+    if (targetAreas)       { CUDA_CHECK(cudaFree(targetAreas));       targetAreas       = nullptr; }
+    if (targetEdgeLengths) { CUDA_CHECK(cudaFree(targetEdgeLengths)); targetEdgeLengths = nullptr; }
+    if (comX)              { CUDA_CHECK(cudaFree(comX));              comX              = nullptr; }
+    if (comY)              { CUDA_CHECK(cudaFree(comY));              comY              = nullptr; }
+    if (perimeters)        { CUDA_CHECK(cudaFree(perimeters));        perimeters        = nullptr; }
+    if (startIndices)      { CUDA_CHECK(cudaFree(startIndices));      startIndices      = nullptr; }
+    if (shapeStart)        { CUDA_CHECK(cudaFree(shapeStart));        shapeStart        = nullptr; }
+    if (shapeEnd)          { CUDA_CHECK(cudaFree(shapeEnd));          shapeEnd          = nullptr; }
+    if (constraintNormSq)  { CUDA_CHECK(cudaFree(constraintNormSq));  constraintNormSq  = nullptr; }
+    if (mgsIp)             { CUDA_CHECK(cudaFree(mgsIp));             mgsIp             = nullptr; }
+    if (forceProjIp)       { CUDA_CHECK(cudaFree(forceProjIp));       forceProjIp       = nullptr; }
+    CUDA_CHECK(cudaMalloc((void**)&areas,             numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&targetAreas,       numPolygons * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&targetEdgeLengths, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&comX, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&comY, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&perimeters, numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&startIndices, (numPolygons + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc((void**)&comX,              numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&comY,              numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&perimeters,        numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&startIndices,      (numPolygons + 1) * sizeof(int)));
     CUDA_CHECK(cudaMemcpy(startIndices, startIndicesData.data(), (numPolygons + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMalloc(&shapeStart, numPolygons * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&shapeEnd, numPolygons * sizeof(int)));
-    CUDA_CHECK(cudaMalloc((void**)&constraintNormSq, 3 * numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&mgsIp,            numPolygons * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&forceProjIp,      3 * numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&shapeStart,                numPolygons * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&shapeEnd,                  numPolygons * sizeof(int)));
+    CUDA_CHECK(cudaMalloc((void**)&constraintNormSq,  3 * numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&mgsIp,             numPolygons * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&forceProjIp,       3 * numPolygons * sizeof(double)));
 }
 
 void Model::setNumVertices(int numVertices_) {
     size = numVertices_;
-    CUDA_CHECK(cudaMalloc((void**)&positions, 2 * size * sizeof(double)));
+    if (positions)   { CUDA_CHECK(cudaFree(positions));   positions   = nullptr; }
+    if (edgeLengths) { CUDA_CHECK(cudaFree(edgeLengths)); edgeLengths = nullptr; }
+    if (force)       { CUDA_CHECK(cudaFree(force));       force       = nullptr; }
+    CUDA_CHECK(cudaMalloc((void**)&positions,   2 * size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&edgeLengths, size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&force, size * 2 * sizeof(double)));
+    CUDA_CHECK(cudaMalloc((void**)&force,       size * 2 * sizeof(double)));
 }
 
 void Model::setTargetEdgeLengths(const vector<double>& targetEdgeLengthsData) {

@@ -305,21 +305,21 @@ __global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, do
     double dyNext = wrap(positions[2 * k + 1] - positions[next[k] * 2 + 1]);
     comParts[k + numVertices * alpha] = x1;
 
-    double lenSqPrev = dxPrev * dxPrev + dyPrev * dyPrev;
-    double lenSqNext = dxNext * dxNext + dyNext * dyNext;
+    double lenPrev = sqrt(dxPrev * dxPrev + dyPrev * dyPrev);
+    double lenNext = sqrt(dxNext * dxNext + dyNext * dyNext);
 
     double areaComp  = (2 * alpha - 1) * x4;
     double edge2Comp = alpha ? (dyNext + dyPrev) : (dxNext + dxPrev);
-    double edge4Comp = alpha ? (lenSqPrev * dyPrev + lenSqNext * dyNext) : (lenSqPrev * dxPrev + lenSqNext * dxNext);
+    double edgeComp = alpha ? (dyNext / lenNext) + (dyPrev / lenPrev) : (dxNext / lenNext) + (dxPrev / lenPrev);
 
     constraints[6 * k + alpha] = areaComp;
     constraints[6 * k + 2 + alpha] = edge2Comp;
-    constraints[6 * k + 4 + alpha] = edge4Comp;
+    constraints[6 * k + 4 + alpha] = edgeComp;
 
     int p = shapeId[k];
     atomicAdd(&constraintNormSq[3 * p + 0], areaComp * areaComp);
     atomicAdd(&constraintNormSq[3 * p + 1], edge2Comp * edge2Comp);
-    atomicAdd(&constraintNormSq[3 * p + 2], edge4Comp * edge4Comp);
+    atomicAdd(&constraintNormSq[3 * p + 2], edgeComp * edgeComp);
 
     if (alpha) return;
     double dx = wrap(positions[2 * next[k]] - positions[2 * k]);

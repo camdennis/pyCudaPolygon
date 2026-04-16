@@ -6,7 +6,7 @@ class Mixin():
         # random number generator fallback
         self.rng = rng if rng is not None else np.random.default_rng()
 
-    def draw(self, ax = None, numbering = False, forces = None, arrowColor = 'r', axisSize = 1, ms = 3):
+    def draw(self, ax = None, numbering = False, forces = None, arrowColor = 'r', axisSize = 1, ms = 3, marker = '-o'):
 
         def fixPXPY(px, py):
             minX = min(px)
@@ -46,7 +46,7 @@ class Mixin():
             for i in range(3):
                 for j in range(3):
                     line, = ax.plot((px + i - 1) * axisSize, (py + j - 1) * axisSize,
-                            '-o', markersize=ms,
+                            marker, markersize=ms,
                             color=color,
                             markerfacecolor=color,
                             markeredgecolor=color)

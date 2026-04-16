@@ -155,6 +155,8 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
     normalizeConstraintsKernel<<<numBlocks, blockSize>>>(numVertices, shapeId, constraints, constraintNormSq);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaFree(d_temp_storage));
 }
 
 extern "C" void projectForceCUDA(int numVertices, int numPolygons, int* shapeId, double* constraints, double* constraintNormSq, double* ip, double* fp, double* force) {
