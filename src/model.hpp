@@ -2,8 +2,11 @@
 #define MODEL_HPP
 
 #include <vector>
+#include <tuple>
 #include <cufft.h>
+
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 #include <complex>
 #include <math.h>
 #include <curand_kernel.h>
@@ -42,6 +45,7 @@ public:
     void setTargetAreas(const vector<double>& targetAreas_);
     void setStiffness(const double stiffness_);
     void setCompressibility(const double compressibility_);
+    double getStiffness() const;
     double getCompressibility() const;
 
     // getters
@@ -85,6 +89,10 @@ public:
 
     void updatePolygonGeometry();
     void projectForce();
+    int  shakeProject(int nIter, double tol = 1e-15);
+    int  getLastShakeIters() const;
+    void saveTentativePositions();
+    double getMaxEffectiveForce(double dt, minimizerEnum minimizerType) const;
     void updateNeighborCells();
     void updateNeighbors();
     void updateOverlapArea(int pointDensity_);
@@ -94,6 +102,9 @@ public:
     void updateCompactedIntersections();
     void updateForceEnergy();
     void updatePositions(double dt);
+    void resetVelocities();
+    std::tuple<double, double, double, int> minimizeFIREStep(double dt, double alpha, int nPos, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5, int shakeIter = 5);
+    std::tuple<double, double, int> minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5, int shakeIter = 5);
 
     // misc:
     void resetAreas();
@@ -131,7 +142,7 @@ private:
     uint64_t* outputIdx;
     int* shapeCounts;
     uint64_t* intersections;
-    float2* tu, *tuTMP, *ut, *utTMP;
+    double2* tu, *tuTMP, *ut, *utTMP;
     int numIntersections = 0;
     uint64_t* outersections, *outersectionsTMP;
     uint32_t* keys;
@@ -150,6 +161,27 @@ private:
     double* constraintNormSq;
     double* mgsIp;
     double* forceProjIp;
+    cusolverDnHandle_t cusolverHandle = nullptr;
+    int polygonSize = 0;
+    double* edgeGradTMP = nullptr;
+    double* uMat = nullptr;
+    double* singularValuesTMP = nullptr;
+    double* vMatTMP = nullptr;
+    int* solverInfoTMP = nullptr;
+    double* qAreaVec = nullptr;
+    double* cusolverWorkspace = nullptr;
+    int cusolverWorkspaceSize = 0;
+    double* hRnrmF = nullptr;
+    double* xpbdArea;
+    double* xpbdGradNormSq;
+    double* positionsTMP;
+    double* positionsTMP2;
+    double* effForceMagTMP;
+    double* velocities;
+    double* fireScratchTMP;
+    double* fireResultTMP;
+    int*    shakeItersTMP;
+    int     lastShakeIters;
 };
 
 #endif

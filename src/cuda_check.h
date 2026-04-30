@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -23,6 +24,16 @@
         if (_err != cudaSuccess) {                                                \
             fprintf(stderr, "CUDA error (non-fatal) at %s:%d: %s\n",             \
                     __FILE__, __LINE__, cudaGetErrorString(_err));                 \
+        }                                                                         \
+    } while (0)
+
+#define CUSOLVER_CHECK(call)                                                      \
+    do {                                                                          \
+        cusolverStatus_t _err = (call);                                           \
+        if (_err != CUSOLVER_STATUS_SUCCESS) {                                    \
+            fprintf(stderr, "cuSolver error at %s:%d: %d\n",                     \
+                    __FILE__, __LINE__, (int)_err);                               \
+            exit(EXIT_FAILURE);                                                   \
         }                                                                         \
     } while (0)
 

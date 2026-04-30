@@ -5,8 +5,8 @@ import sys
 import os
 
 # Adds a relative path to find libpyCudaElasto
-sys.path.append(os.path.join(
-    os.path.dirname(__file__), "..", "build"
-))
+sys.path.append(os.path.abspath(os.path.join(
+    os.path.dirname(__file__), ".."
+)))
 
 import libpyCudaPolygon

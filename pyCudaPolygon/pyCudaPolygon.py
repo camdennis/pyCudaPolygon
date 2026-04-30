@@ -36,10 +36,11 @@ class model(lpcp.Model, *mixins.values()):
 
     # initializers
 
-    def __init__(self, size = 0, seed = None, modelType = "normal", stiffness = 0):
+    def __init__(self, size = 0, seed = None, modelType = "normal", stiffness = 0, compressibility = 0):
         lpcp.Model.__init__(self, size)
         self.setModelEnum(modelType)
         self.setStiffness(stiffness)
+        self.setCompressibility(compressibility)
         if seed is None:
             self.rng = np.random.default_rng()
         else:
@@ -52,6 +53,16 @@ class model(lpcp.Model, *mixins.values()):
 
     def initializeNeighborCells(self):
         lpcp.Model.initializeNeighborCells(self)
+        # Just in case, set the maximum edge lengths to be large
+        self.setMaxEdgeLength()
+    
+    def initForceEnergy(self):
+        t = self.getModelEnum()
+        if t == "normal":
+            self.initializeNeighborCells()
+            self.updateNeighborCells()
+            self.updateNeighbors()
+            self.updateOutersections()
 
     # setters
 
@@ -69,6 +80,8 @@ class model(lpcp.Model, *mixins.values()):
             lpcp.Model.setModelEnum(self, enums.modelEnum.softBody)
         elif modelType == "normal":
             lpcp.Model.setModelEnum(self, enums.modelEnum.normal)
+        elif modelType == "hybrid":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.hybrid)
         else:
             raise Exception("That Model type does not exist")
 
@@ -149,7 +162,7 @@ class model(lpcp.Model, *mixins.values()):
         targetAreas = phi * areas / totalArea
         self.setAreas(targetAreas)
 
-    def setMaxEdgeLength(self, maxEdgeLength = None):
+    def setMaxEdgeLength(self, maxEdgeLength = 0.5):
         if maxEdgeLength is None:
             maxEdgeLength = 0
             nArray = self.getnArray()
@@ -200,6 +213,9 @@ class model(lpcp.Model, *mixins.values()):
 
     def setCompressibility(self, compressibility):
         lpcp.Model.setCompressibility(self, compressibility)
+
+    def getStiffness(self):
+        return lpcp.Model.getStiffness(self)
 
     def getCompressibility(self):
         return lpcp.Model.getCompressibility(self)
@@ -422,6 +438,54 @@ class model(lpcp.Model, *mixins.values()):
     def getOverlapArea(self):
         return lpcp.Model.getOverlapArea(self)
 
+    def getConstrainedForcePython(self, force):
+        # We want to get the constrained force using all
+        # of the constraints (one per edge per polygon)
+        startIndices = self.getStartIndices()
+        nArray = self.getnArray()
+        positions = self.getPositions()
+        numPolygons = self.getNumPolygons()
+        constrainedForce = force.copy()
+        for polygon in range(numPolygons):
+            start = startIndices[polygon]
+            n = nArray[polygon]
+            end = start + n
+            pos = positions[2 * start : 2 * end]
+            x = pos[::2]
+            y = pos[1::2]
+            # Area gradient row
+            ga = np.zeros(2 * n)
+            diffx = np.roll(x, -1) - np.roll(x, 1) + 1.5
+            diffy = np.roll(y, -1) - np.roll(y, 1) + 1.5
+            diffx %= 1
+            diffy %= 1
+            diffx -= 0.5
+            diffy -= 0.5
+            ga[::2]  =  diffy / 2
+            ga[1::2] = -diffx / 2
+            # Edge gradient rows: forward unit vector e[k] = (r_{k+1} - r_k) / |...|
+            gk = np.zeros((n + 1, 2 * n))
+            tkx = np.roll(x, -1) - x + 1.5
+            tky = np.roll(y, -1) - y + 1.5
+            tkx %= 1.0
+            tky %= 1.0
+            tkx -= 0.5
+            tky -= 0.5
+            norm = np.sqrt(tkx**2 + tky**2)
+            tkx /= norm
+            tky /= norm
+            for edge in range(n):
+                kp1 = (edge + 1) % n
+                gk[edge][edge * 2]     = -tkx[edge]
+                gk[edge][edge * 2 + 1] = -tky[edge]
+                gk[edge][kp1 * 2]      =  tkx[edge]
+                gk[edge][kp1 * 2 + 1]  =  tky[edge]
+            gk[n] = ga
+            Q, R = np.linalg.qr(gk.T)
+            f = force[2 * start : 2 * end]
+            constrainedForce[2 * start : 2 * end] = f - Q @ (Q.T @ f)
+        return constrainedForce
+
     # updaters
 
     def updateNeighbors(self):
@@ -444,6 +508,19 @@ class model(lpcp.Model, *mixins.values()):
     def projectForce(self):
         lpcp.Model.projectForce(self)
 
+    def shakeProject(self, nIter=100, tol=1e-15):
+        return lpcp.Model.shakeProject(self, nIter, tol)
+
+    def getLastShakeIters(self):
+        return lpcp.Model.getLastShakeIters(self)
+
+    def saveTentativePositions(self):
+        lpcp.Model.saveTentativePositions(self)
+
+    def getMaxEffectiveForce(self, dt, minimizerType="GD"):
+        mEnum = enums.minimizerEnum.GD if minimizerType == "GD" else enums.minimizerEnum.FIRE
+        return lpcp.Model.getMaxEffectiveForce(self, dt, mEnum)
+
     def updateNeighborCells(self):
         lpcp.Model.updateNeighborCells(self)
         
@@ -452,7 +529,6 @@ class model(lpcp.Model, *mixins.values()):
 
     def updatePositions(self, dt):
         lpcp.Model.updatePositions(self, dt)
-
 
     def resetAreas(self):
         lpcp.Model.resetAreas(self)
@@ -494,27 +570,31 @@ class model(lpcp.Model, *mixins.values()):
 
     # misc
 
-
-    def minimizeGDStep(self, dt = 1e-3, addedForce = None, dontMove = False, maxDisplacement = 0.05):
+    def minimizeGDStep(self, dt = 1e-3, addedForce = None, dontMove = False, maxDisplacement = 0.05, nIter = 100, tol = 1e-15, minimizerType = "GD"):
         if self.getModelEnum() not in ("edgeOnly", "areaOnly", "softBody"):
             self.updateNeighborCells()
             self.updateNeighbors()
             self.updateOutersections()
         self.updatePolygonGeometry()
         self.updateForceEnergy()
+        actualIter = 0
         if addedForce is not None:
             self.setForces(self.getForces() + addedForce)
         if (self.getMaxUnbalancedForce() * dt > maxDisplacement):
-            return -1
-        if self.getModelEnum() == "normal":
-            self.projectForce()
+            print("here")
+            return -1, -1
         if dontMove:
-            return self.getEnergy()
+            return self.getEnergy(), actualIter
+        if (self.getModelEnum() == "normal"):
+            self.projectForce()
         self.updatePositions(dt)
+        actualIter = 0
+        if self.getModelEnum() == "normal" and nIter > 0:
+            self.shakeProject(nIter, tol)
         self.updatePolygonGeometry()
-        return self.getEnergy()
+        return self.getEnergy(), 0
 
-    def minimizeGD(self, maxUnbalancedForceThreshold = 1e-14, dt = 1e-3, maxSteps = -1, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1, overwriteCheckpoint = False, maxDisplacement = 0.5, maxConstraintViolationThreshold = 1e-3):
+    def minimizeGD(self, maxUnbalancedForceThreshold = 1e-14, dt = 1e-3, maxSteps = -1, addedForce = None, progressBar = False, checkpointDir = None, checkpointFreq = 1, overwriteCheckpoint = False, maxDisplacement = 0.5, maxConstraintViolationThreshold = 1e-3, nIter = 100, tol = 1e-15, minimizerType = "GD"):
         if maxSteps == -1 and maxUnbalancedForceThreshold is None:
             raise ValueError("maxSteps=-1 requires maxUnbalancedForceThreshold to be set")
         dontMove = False
@@ -523,6 +603,10 @@ class model(lpcp.Model, *mixins.values()):
             dontMove = True
 
         total = maxSteps if maxSteps != -1 else None
+        meanIter = 0
+        maxIter = 0
+        minIter = 1e9
+        actualIter = 0
         with tqdm(total = total, desc = "Processing", disable = (not progressBar)) as pbar:
             successes = 0
             prevEnergy = None
@@ -535,25 +619,117 @@ class model(lpcp.Model, *mixins.values()):
                     self.saveModel(checkpointDir + "/" + str(step), overwrite = overwriteCheckpoint)
                 if progressBar:
                     pbar.update(1)
-                energy = self.minimizeGDStep(addedForce = addedForce, dt = dt, dontMove = dontMove, maxDisplacement = maxDisplacement)
-                if maxUnbalancedForceThreshold is not None and self.getMaxUnbalancedForce() <= maxUnbalancedForceThreshold:
-                    return energy
+                energy, actualIter = self.minimizeGDStep(addedForce = addedForce, dt = dt, dontMove = dontMove, maxDisplacement = maxDisplacement, nIter = nIter, tol = tol, minimizerType = minimizerType)
+                meanIter += actualIter / maxSteps
+                maxIter = np.max((actualIter, maxIter))
+                minIter = np.min((actualIter, minIter))
+                if self.getModelEnum() == "normal":
+                    fEff = self.getMaxEffectiveForce(dt, minimizerType)
+                else:
+                    fEff = self.getMaxUnbalancedForce()
+                if maxUnbalancedForceThreshold is not None and fEff <= maxUnbalancedForceThreshold:
+                    return energy, 0, np.array([0])
                 if (self.getModelEnum() == "normal"  and np.max(self.getConstraintViolation()) > maxConstraintViolationThreshold):
-                    return energy
+                    return energy, 0, np.array([0])
                 if prevEnergy is not None and (energy > prevEnergy or energy == -1):
-                    dt = max(1e-16, dt / 2.1)
+                    dt = max(1e-32, dt / 2.1)
                     successes = 0
                 else:
                     successes += 1
                     prevEnergy = energy
                 if successes > 5:
                     successes = 0
-                    dt = min(1, dt * 1.9)
+                    dt = min(1e4, dt * 1.9)
                 step += 1
         if energy is None:
             raise Exception("This is not an appropriate maximum step size. Reset maxSteps.")
-        return energy
-                
+        print(minIter, meanIter, maxIter)
+        return energy, dt, np.array([minIter, meanIter, maxIter])
+
+    def minimizeFIREStep(self, dt, alpha, nPos, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5):
+        """Single FIRE step. Returns (energy, dt, alpha, nPos)."""
+        return lpcp.Model.minimizeFIREStep(self, dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+
+    def minimizeFIRELoop(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False):
+        """
+        FIRE minimizer generator. Yields (energy, maxForce, dt, step) each step.
+        Stops when maxForce <= maxForceThreshold or maxSteps is reached.
+        """
+        lpcp.Model.resetVelocities(self)
+        self.updatePolygonGeometry()
+        self.updateForceEnergy()
+        if self.getModelEnum() == "normal":
+            self.projectForce()
+        alpha = alphaStart
+        nPos = 0
+        with tqdm(total=maxSteps, desc="FIRE", disable=(not progressBar)) as pbar:
+            for step in range(maxSteps):
+                energy, dt, alpha, nPos = self.minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+                maxForce = self.getMaxUnbalancedForce()
+                pbar.update(1)
+                yield energy, maxForce, dt, step + 1
+                if maxForce <= maxForceThreshold:
+                    return
+
+    def minimizeFIRE(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False, checkpointDir=None, checkpointFreq=1, overwriteCheckpoint=False):
+        """
+        FIRE minimizer. For the 'normal' model call
+        updateNeighborCells/updateNeighbors/updateOutersections first.
+        maxSteps=0 initializes state without stepping.
+        Returns (energy, dt, steps).
+        """
+        lpcp.Model.resetVelocities(self)
+        if self.getModelEnum() == "normal":
+            self.initForceEnergy()
+        self.updatePolygonGeometry()
+        self.updateForceEnergy()
+        if self.getModelEnum() == "normal":
+            self.projectForce()
+        # One tiny GD step to refresh intersection detection and escape
+        # containment configurations (polygon fully inside another) that are
+        # invisible to the edge-crossing detector at exact loaded positions.
+        counter = 0
+        if self.getModelEnum() == "normal" and maxSteps > 0:
+            self.updatePositions(dt)
+            self.updatePolygonGeometry()
+            self.updateNeighborCells()
+            self.updateNeighbors()
+            self.updateOutersections()
+            self.updateForceEnergy()
+            self.projectForce()
+            lpcp.Model.resetVelocities(self)
+        if maxSteps == 0:
+            return self.getEnergy(), dt, 0
+        energy, steps = self.getEnergy(), 0
+        minLoop = 1e9
+        maxLoop = 0
+        sumLoop = 0
+        prevEnergy = 1e9
+
+        for energy, _, dt, steps in self.minimizeFIRELoop(
+                maxForceThreshold=maxForceThreshold, dt=dt, maxSteps=maxSteps,
+                dtMax=dtMax, alphaStart=alphaStart, fAlpha=fAlpha,
+                fInc=fInc, fDec=fDec, nMin=nMin, shakeIter=shakeIter,
+                progressBar=progressBar):
+            if checkpointDir is not None and (steps % checkpointFreq == 0):
+                if not os.path.isdir(checkpointDir):
+                    os.makedirs(checkpointDir)
+                self.saveModel(checkpointDir + "/" + str(steps), overwrite=overwriteCheckpoint)
+                print(self.getEnergy(), self.getMaxUnbalancedForce())
+            curr = self.getLastShakeIters()
+            minLoop = np.min((minLoop, curr))
+            maxLoop = np.max((maxLoop, curr))
+            sumLoop += curr
+            if (np.abs(energy - prevEnergy) < 1e-15):
+                counter += 1
+            if (counter > 5):
+                break
+            prevEnergy = energy
+            
+        if (steps == maxSteps):
+            print("This may not have fully minimized")
+        return energy, dt, steps, np.array([minLoop, sumLoop / maxSteps, maxLoop])
+
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):
             raise Exception("Packing exists. Not saving. To save over this file, set kwarg overwrite = True")
@@ -569,6 +745,8 @@ class model(lpcp.Model, *mixins.values()):
         kv["modelEnum"] = str(modelEnum)
         kv["numVertices"] = numVertices
         kv["maxEdgeLength"] = maxEdgeLength
+        kv["stiffness"] = self.getStiffness()
+        kv["compressibility"] = self.getCompressibility()
         saveFile = dirName + "/scalars.dat"
         with open(saveFile, 'w') as f:
             for k in kv.keys():
@@ -578,7 +756,22 @@ class model(lpcp.Model, *mixins.values()):
         # file since splitting it up is easy with the scalars.dat file
         state = np.concatenate((nArray, positions))
         np.save(dirName + "/state", state)
-        
+        # Save per-polygon arrays needed to fully restore model state
+        np.savez(dirName + "/arrays",
+                 targetAreas=self.getTargetAreas(),
+                 targetEdgeLengths=self.getTargetEdgeLengths())
+
+    def minimizeSoftBody(self):
+        initialModelType = self.getModelEnum()
+        self.setStiffness(1)
+        self.setCompressibility(1)
+        self.updateForceEnergy()
+        self.setModelEnum("softBody")
+        self.minimizeFIRE(dt = 0.1, maxForceThreshold = 1e-14)
+        self.resetAreas()
+        self.updatePolygonGeometry()
+        self.setModelEnum(initialModelType)
+
     def loadModel(self, dirName):
         state = np.load(dirName + "/state.npy")
         scalarsFile = dirName + "/scalars.dat"
@@ -588,6 +781,8 @@ class model(lpcp.Model, *mixins.values()):
         modelType = "normal"
         numVertices = 0
         maxEdgeLength = 0.5
+        stiffness = 0.0
+        compressibility = 0.0
         for line in lines:
             k, v = line.split("\n")[0].split("\t")
             if (k == "modelEnum:"):
@@ -596,6 +791,10 @@ class model(lpcp.Model, *mixins.values()):
                 numVertices = int(v)
             elif (k == "maxEdgeLength:"):
                 maxEdgeLength = float(v)
+            elif (k == "stiffness:"):
+                stiffness = float(v)
+            elif (k == "compressibility:"):
+                compressibility = float(v)
         try:
             self.setModelEnum(modelType)
         except Exception:
@@ -606,6 +805,16 @@ class model(lpcp.Model, *mixins.values()):
         self.setnArray(nArray)
         positions = state[-self.getNumVertices() * 2:].copy()
         self.setPositions(positions)
+        self.setMaxEdgeLength(maxEdgeLength)
+        self.setStiffness(stiffness)
+        self.setCompressibility(compressibility)
+        self.initializeNeighborCells()
+        # Restore per-polygon constraint arrays if saved with new format
+        arrays_path = dirName + "/arrays.npz"
+        if os.path.exists(arrays_path):
+            arrays = np.load(arrays_path)
+            self.setTargetAreas(arrays['targetAreas'])
+            self.setTargetEdgeLengths(arrays['targetEdgeLengths'])
 
     def makeSubModel(self, sub):
         pos0 = self.getPositions()

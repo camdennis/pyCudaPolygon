@@ -91,7 +91,7 @@ __global__ void maxReduceKernel(const int* __restrict__ data, int n, int* __rest
     }
 }
 
-__global__ void gatherKernel_float2(const float2* input, const uint32_t* perm, float2* output, int n) {
+__global__ void gatherKernel_double2(const double2* input, const uint32_t* perm, double2* output, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         output[idx] = input[perm[idx]];
@@ -141,7 +141,7 @@ __device__ double h(double2 pt1, double2 pt2, double2 startPoint) {
     double2 r2 = {pt2.x - startPoint.x, pt2.y - startPoint.y};
     r1 = wrap2(r1);
     r2 = wrap2(r2);
-    double2 d = {r2.x - r1.x, r2.y - r1.y};
+    double2 d = wrap2({r2.x - r1.x, r2.y - r1.y});
     return (r1.x + r2.x) * d.y;
 }
 
@@ -165,7 +165,9 @@ __device__ void getDf(double2 vi, double2 vzi, double2 vj, double2 vzj, double* 
     double2 dij = wrap2({vj.x - vi.x, vj.y - vi.y});
 
     double w = dj.x * di.y - dj.y * di.x;
-    if (fabs(w) < 1e-12) {
+    double diNorm2 = di.x*di.x + di.y*di.y;
+    double djNorm2 = dj.x*dj.x + dj.y*dj.y;
+    if (w*w < 1e-12 * diNorm2 * djNorm2 || diNorm2 < 1e-28 || djNorm2 < 1e-28) {
         for (int i = 0; i < 16; i++) df[i] = 0.0;
         return;
     }
@@ -380,6 +382,256 @@ __global__ void forceProjectionKernel(int numVertices, int* shapeId, const doubl
 }
 
 
+// ---------------------------------------------------------------------------
+// n+1 individual constraint force projection
+// ---------------------------------------------------------------------------
+
+__global__ void buildEdgeGradMatrixKernel(
+        int numVertices, const int* shapeId, const int* startIndices,
+        const int* next, const double* positions, double* edgeGradTMP, int n) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    int p = shapeId[k];
+    int k_loc = k - startIndices[p];
+    double dx = wrap(positions[2*next[k]]   - positions[2*k]);
+    double dy = wrap(positions[2*next[k]+1] - positions[2*k+1]);
+    double len = sqrt(dx*dx + dy*dy);
+    if (len < 1e-14) return;
+    double tx = dx / len, ty = dy / len;
+    double* col = edgeGradTMP + (long long)p * 2*n*n + (long long)k_loc * 2*n;
+    col[2*k_loc]               = -tx;
+    col[2*k_loc + 1]           = -ty;
+    col[2*((k_loc+1)%n)]       =  tx;
+    col[2*((k_loc+1)%n) + 1]   =  ty;
+}
+
+// One block per polygon. blockDim.x must be >= 2n.
+// smem layout: [0..2n-1] = area gradient loaded from constraints,
+//              then overwritten with v after projection.
+__global__ void gramSchmidtAreaKernel(
+        int numPolygons, int n,
+        const int* startIndices, const int* shapeId,
+        const double* uMat,         // Q: (2n x n) per polygon, stride 2n*n
+        const double* constraints,  // normalized area gradient at [6*k+0,1]
+        double* qAreaVec) {         // output: 2 doubles per vertex
+    extern __shared__ double smem[];
+    int p = blockIdx.x;
+    if (p >= numPolygons) return;
+    int start = startIndices[p];
+    int tid = threadIdx.x;
+
+    // Load normalized area gradient — direction is all that matters for GS
+    for (int i = tid; i < 2*n; i += blockDim.x) {
+        int k = start + i/2;
+        int alpha = i % 2;
+        smem[i] = constraints[6*k + alpha];
+    }
+    __syncthreads();
+
+    // Project out each column of Q: smem -= (Q[:,j] . smem) * Q[:,j]
+    const double* Q = uMat + (long long)p * 2*n*n;
+    for (int j = 0; j < n; j++) {
+        // Reduce: dot = Q[:,j] . smem
+        double dot = 0.0;
+        for (int i = tid; i < 2*n; i += blockDim.x) dot += Q[j*2*n + i] * smem[i];
+        // Warp + block reduction
+        for (int off = warpSize/2; off > 0; off >>= 1) dot += __shfl_down_sync(0xffffffff, dot, off);
+        if (tid % warpSize == 0) smem[2*n + tid/warpSize] = dot;
+        __syncthreads();
+        if (tid == 0) {
+            double sum = 0.0;
+            for (int w = 0; w < (blockDim.x + warpSize - 1)/warpSize; w++) sum += smem[2*n + w];
+            smem[2*n] = sum;
+        }
+        __syncthreads();
+        dot = smem[2*n];
+        for (int i = tid; i < 2*n; i += blockDim.x) smem[i] -= dot * Q[j*2*n + i];
+        __syncthreads();
+    }
+
+    // Normalize
+    double mag = 0.0;
+    for (int i = tid; i < 2*n; i += blockDim.x) mag += smem[i] * smem[i];
+    for (int off = warpSize/2; off > 0; off >>= 1) mag += __shfl_down_sync(0xffffffff, mag, off);
+    if (tid % warpSize == 0) smem[2*n + tid/warpSize] = mag;
+    __syncthreads();
+    if (tid == 0) {
+        double sum = 0.0;
+        for (int w = 0; w < (blockDim.x + warpSize - 1)/warpSize; w++) sum += smem[2*n + w];
+        smem[2*n] = sqrt(sum);
+    }
+    __syncthreads();
+    double invMag = (smem[2*n] > 1e-14) ? 1.0 / smem[2*n] : 0.0;
+    for (int i = tid; i < 2*n; i += blockDim.x)
+        qAreaVec[2*start + i] = smem[i] * invMag;
+}
+
+// One block per polygon. blockDim.x must be >= 2n.
+// smem layout: [0..2n-1] = force slice, [2n..2n+n-1] = fp scalars.
+__global__ void forceProjectFullKernel(
+        int numPolygons, int n,
+        const int* startIndices,
+        const double* uMat,     // Q: (2n x n) per polygon, stride 2n*n
+        const double* qAreaVec, // 2 doubles per vertex
+        double* force) {
+    extern __shared__ double smem[];
+    int p = blockIdx.x;
+    if (p >= numPolygons) return;
+    int start = startIndices[p];
+    int tid = threadIdx.x;
+
+    // Load force slice into smem
+    for (int i = tid; i < 2*n; i += blockDim.x) smem[i] = force[2*start + i];
+    __syncthreads();
+
+    // Remove each edge constraint direction
+    const double* Q = uMat + (long long)p * 2*n*n;
+    for (int j = 0; j < n; j++) {
+        double dot = 0.0;
+        for (int i = tid; i < 2*n; i += blockDim.x) dot += Q[j*2*n + i] * smem[i];
+        for (int off = warpSize/2; off > 0; off >>= 1) dot += __shfl_down_sync(0xffffffff, dot, off);
+        if (tid % warpSize == 0) smem[2*n + tid/warpSize] = dot;
+        __syncthreads();
+        if (tid == 0) {
+            double sum = 0.0;
+            for (int w = 0; w < (blockDim.x + warpSize - 1)/warpSize; w++) sum += smem[2*n + w];
+            smem[2*n] = sum;
+        }
+        __syncthreads();
+        dot = smem[2*n];
+        for (int i = tid; i < 2*n; i += blockDim.x) smem[i] -= dot * Q[j*2*n + i];
+        __syncthreads();
+    }
+
+    // Remove area constraint direction
+    double dot = 0.0;
+    for (int i = tid; i < 2*n; i += blockDim.x) dot += qAreaVec[2*start + i] * smem[i];
+    for (int off = warpSize/2; off > 0; off >>= 1) dot += __shfl_down_sync(0xffffffff, dot, off);
+    if (tid % warpSize == 0) smem[2*n + tid/warpSize] = dot;
+    __syncthreads();
+    if (tid == 0) {
+        double sum = 0.0;
+        for (int w = 0; w < (blockDim.x + warpSize - 1)/warpSize; w++) sum += smem[2*n + w];
+        smem[2*n] = sum;
+    }
+    __syncthreads();
+    dot = smem[2*n];
+    for (int i = tid; i < 2*n; i += blockDim.x) smem[i] -= dot * qAreaVec[2*start + i];
+
+    // Write back
+    for (int i = tid; i < 2*n; i += blockDim.x) force[2*start + i] = smem[i];
+}
+
+// ---------------------------------------------------------------------------
+// XPBD position-space constraint projection
+// ---------------------------------------------------------------------------
+
+// Project edges of a single color (0 = even local indices, 1 = odd) back to
+// their target length.  For even n, within each color no two active edges
+// share a vertex, so direct (non-atomic) writes are safe.
+__global__ void xpbdEdgeProjectKernel(
+        int numVertices, const int* startIndices, const int* shapeId,
+        const int* next, double* positions,
+        const double* targetEdgeLengths, int color) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    int p = shapeId[k];
+    if ((k - startIndices[p]) % 2 != color) return;
+
+    int nk = next[k];
+    double ex = wrap(positions[2*nk]   - positions[2*k]);
+    double ey = wrap(positions[2*nk+1] - positions[2*k+1]);
+    double len = sqrt(ex*ex + ey*ey);
+    if (len < 1e-14) return;
+
+    double c = 0.5 * (len - targetEdgeLengths[p]) / len;
+    positions[2*k]     += c * ex;
+    positions[2*k+1]   += c * ey;
+    positions[2*nk]    -= c * ex;
+    positions[2*nk+1]  -= c * ey;
+}
+
+// Pass 1 of area projection: accumulate current signed area and ||grad A||^2
+// per polygon using atomic adds into pre-zeroed scratch buffers.
+__global__ void xpbdAreaReductionKernel(
+        int numVertices, const int* shapeId, const int* startIndices,
+        const int* next, const int* prev, const double* positions,
+        double* d_area, double* d_gradNormSq) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    int p  = shapeId[k];
+    int s  = startIndices[p];
+    int nk = next[k], pk = prev[k];
+
+    // MIC-wrapped positions relative to polygon start vertex
+    double xs  = positions[2*s],     ys  = positions[2*s+1];
+    double xk  = wrap(positions[2*k]   - xs), yk  = wrap(positions[2*k+1]   - ys);
+    double xnk = wrap(positions[2*nk]  - xs), ynk = wrap(positions[2*nk+1]  - ys);
+    double xpk = wrap(positions[2*pk]  - xs), ypk = wrap(positions[2*pk+1]  - ys);
+
+    // Shoelace contribution: 0.5*(x_k * y_{k+1} - x_{k+1} * y_k)
+    atomicAdd(&d_area[p], 0.5 * (xk * ynk - xnk * yk));
+
+    // Gradient: dA/dx_k = 0.5*(y_{k+1}' - y_{k-1}'), dA/dy_k = 0.5*(x_{k-1}' - x_{k+1}')
+    double gx = 0.5 * (ynk - ypk);
+    double gy = 0.5 * (xpk - xnk);
+    atomicAdd(&d_gradNormSq[p], gx*gx + gy*gy);
+}
+
+// Pass 2 of area projection: apply correction delta_x_k = -alpha * grad_k A
+// where alpha = (A - A0) / ||grad A||^2.
+__global__ void xpbdAreaCorrectionKernel(
+        int numVertices, const int* shapeId, const int* startIndices,
+        const int* next, const int* prev, double* positions,
+        const double* d_area, const double* d_gradNormSq,
+        const double* targetAreas) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    int p  = shapeId[k];
+    int s  = startIndices[p];
+    int nk = next[k], pk = prev[k];
+
+    double alpha = (d_area[p] - targetAreas[p]) / fmax(d_gradNormSq[p], 1e-24);
+
+    double xs  = positions[2*s],     ys  = positions[2*s+1];
+    double xnk = wrap(positions[2*nk]  - xs), ynk = wrap(positions[2*nk+1]  - ys);
+    double xpk = wrap(positions[2*pk]  - xs), ypk = wrap(positions[2*pk+1]  - ys);
+    double gx  = 0.5 * (ynk - ypk);
+    double gy  = 0.5 * (xpk - xnk);
+
+    positions[2*k]   -= alpha * gx;
+    positions[2*k+1] -= alpha * gy;
+}
+
+__global__ void xpbdEdgeDeviationKernel(
+        int numVertices, const int* shapeId, const int* next,
+        const double* positions, const double* targetEdgeLengths, double* dev) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    int p = shapeId[k];
+    int nk = next[k];
+    double ex = wrap(positions[2*nk]   - positions[2*k]);
+    double ey = wrap(positions[2*nk+1] - positions[2*k+1]);
+    dev[k] = fabs(sqrt(ex*ex + ey*ey) - targetEdgeLengths[p]);
+}
+
+__global__ void xpbdAreaDeviationKernel(
+        int numPolygons, const double* area, const double* targetAreas, double* dev) {
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= numPolygons) return;
+    dev[p] = fabs(area[p] - targetAreas[p]);
+}
+
+__global__ void effectiveForceMagKernel(
+        int numVertices, const double* positions, const double* tentPos,
+        const double* force, double scale, double* mag) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= numVertices) return;
+    double fx = force[2*k]   + scale * (positions[2*k]   - tentPos[2*k]);
+    double fy = force[2*k+1] + scale * (positions[2*k+1] - tentPos[2*k+1]);
+    mag[k] = sqrt(fx*fx + fy*fy);
+}
+
 __global__ void normalizeKernel(int numPolygons, double* comX, double* comY, double* positions, int* startIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numPolygons) return;
@@ -454,7 +706,7 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
     }
 }
 
-__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, float2* __restrict__ tu,  bool* __restrict__ inside) {
+__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, double2* __restrict__ tu,  bool* __restrict__ inside) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
     if (id1 >= size) return;
@@ -583,7 +835,7 @@ __global__ void updateValidAndCountsKernel(const int numVertices, const int* __r
     }
 }
 
-__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, const float2* __restrict__ tuSrc, float2* __restrict__ tuOut) {
+__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, const double2* __restrict__ tuSrc, double2* __restrict__ tuOut) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalNeighbors = numVertices * maxNeighbors;
     if (idx >= totalNeighbors) return;
@@ -621,7 +873,7 @@ __global__ void updateCompactedIntersectionsKernel(const int numVertices, const 
                  (uint64_t)(uint16_t)n2;
     }
     intersections[outPos] = packed;
-    tuOut[outPos] = make_float2(tVal, uVal);
+    tuOut[outPos] = make_double2(tVal, uVal);
 }
 
 __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, int pointDensity, int* __restrict__ intersectionsCounter, const int* __restrict__ neighborIndices, int size, int boxSize, const int* __restrict__ countPerBox, const double* __restrict__ positions) {
@@ -726,7 +978,7 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
 //    intersectionsCounter[idx] = numIntersections;
 }
 
-__global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersections, const float2* __restrict__ tu, float2* __restrict__ ut, const int* __restrict__ startIndices, int numIntersections, uint64_t* __restrict__ outersections) {
+__global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersections, const double2* __restrict__ tu, double2* __restrict__ ut, const int* __restrict__ startIndices, int numIntersections, uint64_t* __restrict__ outersections) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numIntersections) return;
 
@@ -812,7 +1064,7 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     ut[idx] = tu[player];
 }
 
-__global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint64_t* __restrict__ intersections, const uint64_t* __restrict__ outersections, const float2* __restrict__ tu, const float2* __restrict__ ut, const double* __restrict__ positions, const int* __restrict__ next, const int* __restrict__ prev, const int* __restrict__ shapeId, const int* __restrict__ startIndices, double* __restrict__ force, double* __restrict__ energyGlobal) {
+__global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint64_t* __restrict__ intersections, const uint64_t* __restrict__ outersections, const double2* __restrict__ tu, const double2* __restrict__ ut, const double* __restrict__ positions, const int* __restrict__ next, const int* __restrict__ prev, const int* __restrict__ shapeId, const int* __restrict__ startIndices, double* __restrict__ force, double* __restrict__ energyGlobal) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     double localEnergy = 0.0;
@@ -853,31 +1105,19 @@ __global__ void updateForceEnergyExteriorKernel(int numIntersections, const uint
         double2 pzk = *reinterpret_cast<const double2*>(&positions[2*zk]);
         double2 pzl = *reinterpret_cast<const double2*>(&positions[2*zl]);
 
-        // startPoint = first vertex of the earlier shape
-        int startID = (start1 < start2) ? start1 : start2;
-        double2 startPoint = *reinterpret_cast<const double2*>(&positions[2*startID]);
-
         // ---- Edge vectors and parameters ----
         double2 r1 = wrap2({pzi.x - pi.x, pzi.y - pi.y});
         double2 r2 = wrap2({pzk.x - pk.x, pzk.y - pk.y});
 
-        float2 tuf = tu[idx];
-        float2 utf = ut[idx];
+        double2 tuf = tu[idx];
+        double2 utf = ut[idx];
         double t1 = tuf.y;          // second component
         double t2 = utf.y;
 
-        // fij = (pi + t1*r1) mod 1
-        double2 fij;
-        fij.x = pi.x + t1 * r1.x;
-        fij.y = pi.y + t1 * r1.y;
-        fij.x = fmod(fij.x + 1.0, 1.0);
-        fij.y = fmod(fij.y + 1.0, 1.0);
+        double2 fij = wrap2({pi.x + t1 * r1.x, pi.y + t1 * r1.y});
+        double2 fkl = wrap2({pk.x + t2 * r2.x, pk.y + t2 * r2.y});
 
-        double2 fkl;
-        fkl.x = pk.x + t2 * r2.x;
-        fkl.y = pk.y + t2 * r2.y;
-        fkl.x = fmod(fkl.x + 1.0, 1.0);
-        fkl.y = fmod(fkl.y + 1.0, 1.0);
+        double2 startPoint = fij;
 
         if (i == l) {
             // Branch 1: i == l
@@ -1111,7 +1351,7 @@ __global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId,
     }
 }
 
-__global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t* intersections, const uint64_t* outersections, const float2* tu, const float2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int* shapeStart, int* shapeEnd) {
+__global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t* intersections, const uint64_t* outersections, const double2* tu, const double2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int* shapeStart, int* shapeEnd) {
     int m = blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= numVertices) return;
 
@@ -1137,8 +1377,7 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
         uint64_t outer = outersections[k];
         if (inter == outer) continue;
 
-        int si = (inter >> 32) & 0xFFFF;      // must equal s
-        int sj = (inter >> 48) & 0xFFFF;
+        int si = (inter >> 32) & 0xFFFF;
         int iLoc = (inter >> 16) & 0xFFFF;
         int lLoc = outer & 0xFFFF;
 
@@ -1148,11 +1387,13 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
 
         // Condition from Python: edge lies strictly between i and l
         if (iDist > 0 && iDist < lDist) {
-            // startPoint = first vertex of the earlier shape (si or sj)
-            int startID1 = startIndices[si];
-            int startID2 = startIndices[sj];
-            int startID = (startID1 < startID2) ? startID1 : startID2;
-            double2 startPoint = *reinterpret_cast<const double2*>(&positions[2*startID]);
+            // startPoint = fij for this intersection, matching the exterior kernel's reference.
+            int i_k = startIndices[si] + iLoc;
+            double2 pi_k  = *reinterpret_cast<const double2*>(&positions[2*i_k]);
+            double2 pzi_k = *reinterpret_cast<const double2*>(&positions[2*next[i_k]]);
+            double2 ri_k  = wrap2({pzi_k.x - pi_k.x, pzi_k.y - pi_k.y});
+            double  t1_k  = tu[k].y;
+            double2 startPoint = wrap2({pi_k.x + t1_k * ri_k.x, pi_k.y + t1_k * ri_k.y});
 
             // Energy contribution
             localEnergy += h(pm, pnxt, startPoint);
@@ -1182,15 +1423,19 @@ __global__ void updateForceEnergyInteriorKernel(int numVertices, const uint64_t*
     }
 }
 
+__global__ void translateVertexKernel(int numVertices, double* positions, double* delta) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numVertices * 2) return;
+    double p = positions[idx] + delta[idx];
+    positions[idx] = p - floor(p);
+}
+
 __global__ void updatePositionsKernel(int numVertices, double* positions, const double* force, double dt) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
     double p = positions[idx] + force[idx] * dt;
     positions[idx] = p - floor(p);
 }
-
-
-//misc
 
 __global__ void resetAreasKernel(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;

@@ -10,11 +10,16 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(libpyCudaPolygon, m) {
+    pybind11::enum_<minimizerEnum>(m, "minimizerEnum")
+        .value("GD",   minimizerEnum::GD)
+        .value("FIRE", minimizerEnum::FIRE);
+
     pybind11::enum_<simControlStruct::modelEnum>(m, "modelEnum")
         .value("normal",   simControlStruct::modelEnum::normal)
         .value("edgeOnly", simControlStruct::modelEnum::edgeOnly)
         .value("areaOnly", simControlStruct::modelEnum::areaOnly)
         .value("softBody", simControlStruct::modelEnum::softBody)
+        .value("hybrid",   simControlStruct::modelEnum::hybrid)
         .value("abnormal", simControlStruct::modelEnum::abnormal);
 
     py::class_<Model>(m, "Model")
@@ -41,11 +46,16 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setTargetAreas", &Model::setTargetAreas)
         .def("setStiffness", &Model::setStiffness)
         .def("setCompressibility", &Model::setCompressibility)
+        .def("getStiffness", &Model::getStiffness)
         .def("getCompressibility", &Model::getCompressibility)
         // updaters
 
         .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
         .def("projectForce", &Model::projectForce)
+        .def("shakeProject", &Model::shakeProject)
+        .def("getLastShakeIters", &Model::getLastShakeIters)
+        .def("saveTentativePositions", &Model::saveTentativePositions)
+        .def("getMaxEffectiveForce", &Model::getMaxEffectiveForce)
 .def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("updateValidAndCounts", &Model::updateValidAndCounts)
@@ -91,5 +101,8 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getEdgeLengths", &Model::getEdgeLengths)
         .def("getMaxUnbalancedForce", &Model::getMaxUnbalancedForce)
         .def("getCOM", &Model::getCOM)
-        .def("getOverlapArea", &Model::getOverlapArea);
+        .def("getOverlapArea", &Model::getOverlapArea)
+        .def("resetVelocities", &Model::resetVelocities)
+        .def("minimizeFIREStep", &Model::minimizeFIREStep)
+        .def("minimizeFIRE", &Model::minimizeFIRE);
 }
