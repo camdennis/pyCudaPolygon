@@ -41,6 +41,7 @@ class model(lpcp.Model, *mixins.values()):
         self.setModelEnum(modelType)
         self.setStiffness(stiffness)
         self.setCompressibility(compressibility)
+        self._mel = None  # tracks last user-set maxEdgeLength scalar
         if seed is None:
             self.rng = np.random.default_rng()
         else:
@@ -53,8 +54,43 @@ class model(lpcp.Model, *mixins.values()):
 
     def initializeNeighborCells(self):
         lpcp.Model.initializeNeighborCells(self)
-        # Just in case, set the maximum edge lengths to be large
-        self.setMaxEdgeLength()
+        # Restore user-set maxEdgeLength (preserves boxSize); fall back to 0.5
+        if self._mel is not None:
+            lpcp.Model.setMaxEdgeLength(self, self._mel)
+        else:
+            self.setMaxEdgeLength()
+
+    def initializeNeighborBall(self):
+        lpcp.Model.initializeNeighborBall(self)
+        # Ensure maxEdgeLength is set so the first updateNeighborBall has a
+        # meaningful ball radius. Mirrors the behavior of initializeNeighborCells.
+        if self._mel is not None:
+            lpcp.Model.setMaxEdgeLength(self, self._mel)
+        else:
+            self.setMaxEdgeLength()
+
+    def setNeighborType(self, neighborType):
+        if isinstance(neighborType, str):
+            if neighborType == "cells":
+                lpcp.Model.setNeighborType(self, enums.neighborTypeEnum.cells)
+            elif neighborType == "balls":
+                lpcp.Model.setNeighborType(self, enums.neighborTypeEnum.balls)
+            else:
+                raise ValueError(f"Unknown neighborType: {neighborType!r}")
+        else:
+            lpcp.Model.setNeighborType(self, neighborType)
+
+    def getNeighborType(self):
+        return lpcp.Model.getNeighborType(self)
+
+    def setSearchFactor(self, searchFactor):
+        lpcp.Model.setSearchFactor(self, searchFactor)
+
+    def getSearchFactor(self):
+        return lpcp.Model.getSearchFactor(self)
+
+    def updateNeighborBall(self):
+        lpcp.Model.updateNeighborBall(self)
     
     def initForceEnergy(self):
         t = self.getModelEnum()
@@ -69,6 +105,12 @@ class model(lpcp.Model, *mixins.values()):
     def setStiffness(self, stiffness):
         lpcp.Model.setStiffness(self, stiffness)
 
+    def setDelta(self, delta):
+        lpcp.Model.setDelta(self, delta)
+
+    def getDelta(self):
+        return lpcp.Model.getDelta(self)
+
     def setModelEnum(self, modelType):
         if modelType == "abnormal":
             lpcp.Model.setModelEnum(self, enums.modelEnum.abnormal)
@@ -82,6 +124,10 @@ class model(lpcp.Model, *mixins.values()):
             lpcp.Model.setModelEnum(self, enums.modelEnum.normal)
         elif modelType == "hybrid":
             lpcp.Model.setModelEnum(self, enums.modelEnum.hybrid)
+        elif modelType == "rounded":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.rounded)
+        elif modelType == "areaSquared":
+            lpcp.Model.setModelEnum(self, enums.modelEnum.areaSquared)
         else:
             raise Exception("That Model type does not exist")
 
@@ -162,7 +208,10 @@ class model(lpcp.Model, *mixins.values()):
         targetAreas = phi * areas / totalArea
         self.setAreas(targetAreas)
 
-    def setMaxEdgeLength(self, maxEdgeLength = 0.5):
+    def setMaxEdgeLength(self, maxEdgeLength = None):
+        # Default (no arg or explicit None): compute the current max edge length
+        # from positions. Pass a number to pin it explicitly (e.g. for a stable
+        # ball radius across position changes).
         if maxEdgeLength is None:
             maxEdgeLength = 0
             nArray = self.getnArray()
@@ -177,6 +226,7 @@ class model(lpcp.Model, *mixins.values()):
                 diff -= 0.5
                 length = np.max(np.sqrt(np.sum(diff**2, axis = 1)))
                 maxEdgeLength = np.max([maxEdgeLength, length])
+        self._mel = maxEdgeLength
         lpcp.Model.setMaxEdgeLength(self, maxEdgeLength)
 
     def setBiPerimeters(self, kappa, ratio = 1.4):
@@ -184,9 +234,9 @@ class model(lpcp.Model, *mixins.values()):
         numPolygons = len(nArray)
         numVertices = self.getNumVertices()
         self.setMaxEdgeLength()
-        self.initializeNeighborCells()
-        self.updateNeighborCells()
-        self.updateNeighbors()
+        # Ball-based init: also sets up topology arrays (shapeId/next/prev)
+        # that updatePolygonGeometry below needs.
+        self.initializeNeighborBall()
         mid = numPolygons // 2
         # The polygon 1 has total perimeter 1
         # Polygon 2 has total perimeter ratio r
@@ -318,6 +368,9 @@ class model(lpcp.Model, *mixins.values()):
     def getEnergy(self):
         return lpcp.Model.getEnergy(self)
 
+    def getPairArea(self):
+        return np.array(lpcp.Model.getPairArea(self))
+
     def getForces(self):
         return np.array(lpcp.Model.getForces(self))
 
@@ -405,7 +458,7 @@ class model(lpcp.Model, *mixins.values()):
         targetPerimeters = nArray * targetEdgeLengths
         rmsPerimeterViolation = np.sqrt(np.mean((1 - perimeters / targetPerimeters)**2))
         rmsEdgeViolation = np.sqrt(np.mean((1 - edgeLengths / np.repeat(targetEdgeLengths, nArray))**2))
-        return np.array([rmsAreaViolation, rmsEdgeViolation, rmsPerimeterViolation])
+        return {"rmsAreaViolation":rmsAreaViolation, "rmsEdgeViolation":rmsEdgeViolation, "rmsPerimeterViolation":rmsPerimeterViolation}
 
     def getConstraints(self):
         return np.array(lpcp.Model.getConstraints(self))
@@ -434,6 +487,24 @@ class model(lpcp.Model, *mixins.values()):
 
     def getMaxUnbalancedForce(self):
         return lpcp.Model.getMaxUnbalancedForce(self)
+
+    def getMaxTangentialForce(self):
+        """Max |F| projected onto the constraint-tangent subspace — the
+        physically meaningful convergence indicator under SHAKE constraints.
+
+        Raw `getMaxUnbalancedForce()` returns max |F| in the full 2N-dim space.
+        At an *unconstrained* minimum (e.g. φ<φ_jam where no overlap is required)
+        both go to zero. At a *constrained* minimum (e.g. jammed φ=1.0 where
+        polygons must overlap) raw |F| floors at the constraint-force scale,
+        while this projected value → 0.
+
+        Side effect: re-projects the internal force array. Call
+        `updateForceEnergy()` afterwards if you need the raw force back."""
+        self.updateForceEnergy()
+        self.projectForce()
+        f_tan = self.getMaxUnbalancedForce()
+        self.updateForceEnergy()
+        return f_tan
 
     def getOverlapArea(self):
         return lpcp.Model.getOverlapArea(self)
@@ -585,11 +656,11 @@ class model(lpcp.Model, *mixins.values()):
             return -1, -1
         if dontMove:
             return self.getEnergy(), actualIter
-        if (self.getModelEnum() == "normal"):
+        if self.getModelEnum() in ("normal", "rounded", "areaSquared"):
             self.projectForce()
         self.updatePositions(dt)
         actualIter = 0
-        if self.getModelEnum() == "normal" and nIter > 0:
+        if self.getModelEnum() in ("normal", "rounded") and nIter > 0:
             self.shakeProject(nIter, tol)
         self.updatePolygonGeometry()
         return self.getEnergy(), 0
@@ -646,11 +717,11 @@ class model(lpcp.Model, *mixins.values()):
         print(minIter, meanIter, maxIter)
         return energy, dt, np.array([minIter, meanIter, maxIter])
 
-    def minimizeFIREStep(self, dt, alpha, nPos, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5):
+    def minimizeFIREStep(self, dt, alpha, nPos, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, rollbackRelTol=1e-10, rollbackAbsTol=1e-14):
         """Single FIRE step. Returns (energy, dt, alpha, nPos)."""
-        return lpcp.Model.minimizeFIREStep(self, dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+        return lpcp.Model.minimizeFIREStep(self, dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter, rollbackRelTol, rollbackAbsTol)
 
-    def minimizeFIRELoop(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False):
+    def minimizeFIRELoop(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False, rollbackRelTol=1e-10, rollbackAbsTol=1e-14):
         """
         FIRE minimizer generator. Yields (energy, maxForce, dt, step) each step.
         Stops when maxForce <= maxForceThreshold or maxSteps is reached.
@@ -658,43 +729,58 @@ class model(lpcp.Model, *mixins.values()):
         lpcp.Model.resetVelocities(self)
         self.updatePolygonGeometry()
         self.updateForceEnergy()
-        if self.getModelEnum() == "normal":
+        if self.getModelEnum() in ("normal", "rounded", "areaSquared"):
             self.projectForce()
         alpha = alphaStart
         nPos = 0
         with tqdm(total=maxSteps, desc="FIRE", disable=(not progressBar)) as pbar:
             for step in range(maxSteps):
-                energy, dt, alpha, nPos = self.minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+                energy, dt, alpha, nPos = self.minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter, rollbackRelTol, rollbackAbsTol)
                 maxForce = self.getMaxUnbalancedForce()
                 pbar.update(1)
                 yield energy, maxForce, dt, step + 1
                 if maxForce <= maxForceThreshold:
                     return
 
-    def minimizeFIRE(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False, checkpointDir=None, checkpointFreq=1, overwriteCheckpoint=False):
+    def minimizeFIRE(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False, checkpointDir=None, checkpointFreq=1, overwriteCheckpoint=False, stuckEnergyTol=0.0, stuckEnergyCount=100):
         """
         FIRE minimizer. For the 'normal' model call
         updateNeighborCells/updateNeighbors/updateOutersections first.
         maxSteps=0 initializes state without stepping.
-        Returns (energy, dt, steps).
+
+        stuckEnergyTol: optional absolute |ΔE| threshold for the "energy
+            is stuck" early-stop. Default 0.0 = disabled (recommended).
+            Near a true minimum, |ΔE| naturally shrinks proportionally to
+            |F|^2·dt; tripping on |ΔE| < 1e-15 used to abort FIRE around
+            |F|~1e-9 while convergence was still working to ~1e-15.
+        stuckEnergyCount: how many *consecutive* steps below stuckEnergyTol
+            trigger the early-stop. The counter resets on any step above tol.
+
+        Returns (energy, dt, steps, [minShake, meanShake, maxShake]).
         """
         lpcp.Model.resetVelocities(self)
         if self.getModelEnum() == "normal":
             self.initForceEnergy()
         self.updatePolygonGeometry()
         self.updateForceEnergy()
-        if self.getModelEnum() == "normal":
+        if self.getModelEnum() in ("normal", "rounded", "areaSquared"):
             self.projectForce()
         # One tiny GD step to refresh intersection detection and escape
         # containment configurations (polygon fully inside another) that are
         # invisible to the edge-crossing detector at exact loaded positions.
         counter = 0
-        if self.getModelEnum() == "normal" and maxSteps > 0:
+        if (self.getModelEnum() == "rounded" or self.getModelEnum() == "normal") and maxSteps > 0:
             self.updatePositions(dt)
             self.updatePolygonGeometry()
-            self.updateNeighborCells()
-            self.updateNeighbors()
-            self.updateOutersections()
+            # normal still needs the cell-grid intersection finder; rounded
+            # now reads the per-vertex candidate list, which the ball builder
+            # populates.
+            if self.getModelEnum() == "normal":
+                self.updateNeighborCells()
+                self.updateNeighbors()
+                self.updateOutersections()
+            else:
+                self.updateNeighborBall()
             self.updateForceEnergy()
             self.projectForce()
             lpcp.Model.resetVelocities(self)
@@ -720,46 +806,100 @@ class model(lpcp.Model, *mixins.values()):
             minLoop = np.min((minLoop, curr))
             maxLoop = np.max((maxLoop, curr))
             sumLoop += curr
-            if (np.abs(energy - prevEnergy) < 1e-15):
-                counter += 1
-            if (counter > 5):
-                break
+            if stuckEnergyTol > 0.0:
+                if np.abs(energy - prevEnergy) < stuckEnergyTol:
+                    counter += 1
+                else:
+                    counter = 0     # reset on any meaningful step
+                if counter > stuckEnergyCount:
+                    print(f"Energy stuck: |ΔE| < {stuckEnergyTol:g} for "
+                          f"{stuckEnergyCount} consecutive steps")
+                    break
             prevEnergy = energy
-            
+
         if (steps == maxSteps):
             print("This may not have fully minimized")
-        return energy, dt, steps, np.array([minLoop, sumLoop / maxSteps, maxLoop])
+        nSteps = max(steps, 1)
+        return energy, dt, steps, np.array([minLoop, sumLoop / nSteps, maxLoop])
 
-    def saveModel(self, dirName, overwrite = False):
-        if not overwrite and os.path.isdir(dirName):
-            raise Exception("Packing exists. Not saving. To save over this file, set kwarg overwrite = True")
-        if not os.path.isdir(dirName):
-            os.mkdir(dirName)
-        # Get stuff to save:
-        modelEnum = self.getModelEnum()
-        numVertices = self.getNumVertices()
-        nArray = np.diff(self.getStartIndices())
-        positions = self.getPositions()
-        maxEdgeLength = self.getMaxEdgeLength()
-        kv = dict()
-        kv["modelEnum"] = str(modelEnum)
-        kv["numVertices"] = numVertices
-        kv["maxEdgeLength"] = maxEdgeLength
-        kv["stiffness"] = self.getStiffness()
-        kv["compressibility"] = self.getCompressibility()
-        saveFile = dirName + "/scalars.dat"
-        with open(saveFile, 'w') as f:
-            for k in kv.keys():
-                f.write(k + ":\t" + str(kv[k]) + "\n")
-        f.close()
-        # We can save the nArray and positions back to back in one
-        # file since splitting it up is easy with the scalars.dat file
-        state = np.concatenate((nArray, positions))
-        np.save(dirName + "/state", state)
-        # Save per-polygon arrays needed to fully restore model state
-        np.savez(dirName + "/arrays",
-                 targetAreas=self.getTargetAreas(),
-                 targetEdgeLengths=self.getTargetEdgeLengths())
+    # ── packing I/O ────────────────────────────────────────────────────────────
+    # Single .npz file per packing. Stores everything needed to reconstruct
+    # model state exactly: positions, nArray, target arrays, and every scalar
+    # parameter (modelEnum, delta, maxEdgeLength, stiffness, compressibility).
+    # Derived state (forces, energies, intersections, velocities) is NOT saved
+    # — call updatePolygonGeometry + updateForceEnergy after loadModel.
+
+    _SAVE_FORMAT_VERSION = 1
+
+    def saveModel(self, path, overwrite=False, compress=False):
+        """Atomically save the packing to a single .npz file.
+
+        Args:
+            path: filename (with or without .npz suffix).
+            overwrite: replace an existing file.
+            compress: use np.savez_compressed (smaller, slower).
+        """
+        if not path.endswith(".npz"):
+            path = path + ".npz"
+        if not overwrite and os.path.exists(path):
+            raise FileExistsError(
+                f"{path} exists; pass overwrite=True to replace it.")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        save_fn = np.savez_compressed if compress else np.savez
+        tmp = path + ".tmp.npz"
+        save_fn(tmp,
+            _format_version  = np.int64(self._SAVE_FORMAT_VERSION),
+            modelEnum        = np.asarray(str(self.getModelEnum())),
+            positions        = np.asarray(self.getPositions(),         dtype=np.float64),
+            nArray           = np.asarray(self.getnArray(),            dtype=np.int64),
+            targetAreas      = np.asarray(self.getTargetAreas(),       dtype=np.float64),
+            targetEdgeLengths= np.asarray(self.getTargetEdgeLengths(), dtype=np.float64),
+            delta            = np.float64(self.getDelta()),
+            maxEdgeLength    = np.float64(self.getMaxEdgeLength()),
+            stiffness        = np.float64(self.getStiffness()),
+            compressibility  = np.float64(self.getCompressibility()),
+        )
+        os.replace(tmp, path)
+
+    def loadModel(self, path):
+        """Load packing state from a .npz file written by saveModel.
+
+        Restores everything needed to fully reproduce a saved configuration.
+        Does NOT recompute forces/energies; call updatePolygonGeometry +
+        updateForceEnergy afterwards.
+        """
+        if not path.endswith(".npz") and not os.path.exists(path):
+            path = path + ".npz"
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"No saved model at {path}")
+
+        data = np.load(path, allow_pickle=False)
+        version = int(data["_format_version"])
+        if version != self._SAVE_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported save format version {version} "
+                f"(this code understands {self._SAVE_FORMAT_VERSION})")
+
+        positions = np.asarray(data["positions"], dtype=np.float64)
+        nArray    = np.asarray(data["nArray"],    dtype=np.int64)
+
+        # Order matters: model type → allocate by vertex count → topology
+        # (nArray) → positions → per-polygon targets → scalar parameters →
+        # cell structure.
+        self.setModelEnum(str(data["modelEnum"]))
+        self.setNumVertices(positions.size // 2)
+        self.setnArray(nArray)
+        self.setPositions(positions)
+        self.setTargetAreas(      np.asarray(data["targetAreas"],       dtype=np.float64))
+        self.setTargetEdgeLengths(np.asarray(data["targetEdgeLengths"], dtype=np.float64))
+        self.setDelta(          float(data["delta"]))
+        self.setMaxEdgeLength(  float(data["maxEdgeLength"]))
+        self.setStiffness(      float(data["stiffness"]))
+        self.setCompressibility(float(data["compressibility"]))
+        self.initializeNeighborCells()
 
     def minimizeSoftBody(self):
         initialModelType = self.getModelEnum()
@@ -771,50 +911,6 @@ class model(lpcp.Model, *mixins.values()):
         self.resetAreas()
         self.updatePolygonGeometry()
         self.setModelEnum(initialModelType)
-
-    def loadModel(self, dirName):
-        state = np.load(dirName + "/state.npy")
-        scalarsFile = dirName + "/scalars.dat"
-        with open(scalarsFile, 'r') as f:
-            lines = f.readlines()
-        f.close()
-        modelType = "normal"
-        numVertices = 0
-        maxEdgeLength = 0.5
-        stiffness = 0.0
-        compressibility = 0.0
-        for line in lines:
-            k, v = line.split("\n")[0].split("\t")
-            if (k == "modelEnum:"):
-                modelType = v
-            elif (k == "numVertices:"):
-                numVertices = int(v)
-            elif (k == "maxEdgeLength:"):
-                maxEdgeLength = float(v)
-            elif (k == "stiffness:"):
-                stiffness = float(v)
-            elif (k == "compressibility:"):
-                compressibility = float(v)
-        try:
-            self.setModelEnum(modelType)
-        except Exception:
-            print("Warning: model enum not found. Setting to normal")
-            self.setModelEnum("normal")
-        self.setNumVertices(numVertices)
-        nArray = state[:-self.getNumVertices() * 2].astype(int).copy()
-        self.setnArray(nArray)
-        positions = state[-self.getNumVertices() * 2:].copy()
-        self.setPositions(positions)
-        self.setMaxEdgeLength(maxEdgeLength)
-        self.setStiffness(stiffness)
-        self.setCompressibility(compressibility)
-        self.initializeNeighborCells()
-        # Restore per-polygon constraint arrays if saved with new format
-        arrays_path = dirName + "/arrays.npz"
-        if os.path.exists(arrays_path):
-            arrays = np.load(arrays_path)
-            self.setTargetAreas(arrays['targetAreas'])
-            self.setTargetEdgeLengths(arrays['targetEdgeLengths'])
 
     def makeSubModel(self, sub):
         pos0 = self.getPositions()

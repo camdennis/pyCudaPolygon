@@ -3,7 +3,8 @@
 
 
 struct simControlStruct {
-	enum class modelEnum {normal, edgeOnly, areaOnly, softBody, abnormal, hybrid} modelType;
+	enum class modelEnum {normal, edgeOnly, areaOnly, softBody, abnormal, hybrid, rounded, areaSquared} modelType;
+	enum class neighborTypeEnum {cells, balls} neighborType = neighborTypeEnum::balls;
 };
 
 enum class minimizerEnum { GD, FIRE };

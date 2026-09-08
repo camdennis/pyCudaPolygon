@@ -20,7 +20,13 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .value("areaOnly", simControlStruct::modelEnum::areaOnly)
         .value("softBody", simControlStruct::modelEnum::softBody)
         .value("hybrid",   simControlStruct::modelEnum::hybrid)
-        .value("abnormal", simControlStruct::modelEnum::abnormal);
+        .value("abnormal", simControlStruct::modelEnum::abnormal)
+        .value("rounded",      simControlStruct::modelEnum::rounded)
+        .value("areaSquared",  simControlStruct::modelEnum::areaSquared);
+
+    pybind11::enum_<simControlStruct::neighborTypeEnum>(m, "neighborTypeEnum")
+        .value("cells", simControlStruct::neighborTypeEnum::cells)
+        .value("balls", simControlStruct::neighborTypeEnum::balls);
 
     py::class_<Model>(m, "Model")
 
@@ -28,6 +34,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         .def(py::init<int>())
         .def("initializeNeighborCells", &Model::initializeNeighborCells)
+        .def("initializeNeighborBall",  &Model::initializeNeighborBall)
 
         // helpers
 
@@ -48,6 +55,34 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("setCompressibility", &Model::setCompressibility)
         .def("getStiffness", &Model::getStiffness)
         .def("getCompressibility", &Model::getCompressibility)
+        .def("setDelta", &Model::setDelta)
+        .def("getDelta", &Model::getDelta)
+        // Per-polygon uniform-delta mode (area-preserving rounded).
+        .def("enablePerPolygonDelta", &Model::enablePerPolygonDelta)
+        .def("disablePerPolygonDelta", &Model::disablePerPolygonDelta)
+        .def("isPerPolygonDeltaEnabled", &Model::isPerPolygonDeltaEnabled)
+        .def("updatePolyDelta", &Model::updatePolyDelta)
+        .def("getPolyDelta", &Model::getPolyDelta)
+        .def("getPolyDeltaTargets", &Model::getPolyDeltaTargets)
+        .def("setPolyDelta", &Model::setPolyDelta)
+        // Phase C scaffolding (sort + RLE).
+        .def("runFeaturePairPhaseC_sort", &Model::runFeaturePairPhaseC_sort)
+        .def("getLastNumUniqueFA", &Model::getLastNumUniqueFA)
+        .def("getSortedCrossingFA", &Model::getSortedCrossingFA)
+        .def("getSortedCrossingParamA", &Model::getSortedCrossingParamA)
+        .def("getSortedCrossingFB", &Model::getSortedCrossingFB)
+        .def("getSortedCrossingX", &Model::getSortedCrossingX)
+        .def("getFeatureUniqueFA", &Model::getFeatureUniqueFA)
+        .def("getFeatureLengths", &Model::getFeatureLengths)
+        .def("runFeaturePairPhaseC_walkArea", &Model::runFeaturePairPhaseC_walkArea)
+        .def("runFeaturePairPhaseC_walkAreaPerPolygon", &Model::runFeaturePairPhaseC_walkAreaPerPolygon)
+        .def("runFeaturePairPhaseC_walkAreaAndForce", &Model::runFeaturePairPhaseC_walkAreaAndForce)
+        .def("runFeaturePairPhaseC_walkAreaAndForceDual", &Model::runFeaturePairPhaseC_walkAreaAndForceDual)
+        .def("getPhaseCForce", &Model::getPhaseCForce)
+        .def("setSearchFactor", &Model::setSearchFactor)
+        .def("getSearchFactor", &Model::getSearchFactor)
+        .def("setNeighborType", &Model::setNeighborType)
+        .def("getNeighborType", &Model::getNeighborType)
         // updaters
 
         .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
@@ -57,6 +92,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("saveTentativePositions", &Model::saveTentativePositions)
         .def("getMaxEffectiveForce", &Model::getMaxEffectiveForce)
 .def("updateNeighborCells", &Model::updateNeighborCells)
+        .def("updateNeighborBall",  &Model::updateNeighborBall)
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("updateValidAndCounts", &Model::updateValidAndCounts)
         .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
@@ -80,6 +116,16 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getMaxEdgeLength", &Model::getMaxEdgeLength)
         .def("getAreas", &Model::getAreas)
         .def("getNeighborCells", &Model::getNeighborCells)
+        .def("getBallNeighbors",     &Model::getBallNeighbors)
+        .def("getNumBallNeighbors",  &Model::getNumBallNeighbors)
+        .def("getBallMaxNeighbors",  &Model::getBallMaxNeighbors)
+        .def("getBallRebuildCount",  &Model::getBallRebuildCount)
+        // Phase 2 feature-pair refactor: test-only entry points for the
+        // new A->B path; not wired into updateForceEnergy yet.
+        .def("runFeaturePairPhaseA",  &Model::runFeaturePairPhaseA)
+        .def("getFeaturePairCapacity", &Model::getFeaturePairCapacity)
+        .def("runFeaturePairPhaseB",  &Model::runFeaturePairPhaseB)
+        .def("getCrossingCapacity",   &Model::getCrossingCapacity)
         .def("getNeighborIndices", &Model::getNeighborIndices)
         .def("getIntersections", &Model::getIntersections)
         .def("getNumIntersections", &Model::getNumIntersections)
@@ -95,6 +141,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getShapeCounts", &Model::getShapeCounts)
         .def("getForces", &Model::getForces)
         .def("getEnergy", &Model::getEnergy)
+        .def("getPairArea", &Model::getPairArea)
         .def("getConstraints", &Model::getConstraints)
         .def("getTargetEdgeLengths", &Model::getTargetEdgeLengths)
         .def("getTargetAreas", &Model::getTargetAreas)
@@ -103,6 +150,16 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getCOM", &Model::getCOM)
         .def("getOverlapArea", &Model::getOverlapArea)
         .def("resetVelocities", &Model::resetVelocities)
-        .def("minimizeFIREStep", &Model::minimizeFIREStep)
-        .def("minimizeFIRE", &Model::minimizeFIRE);
+        .def("minimizeFIREStep", &Model::minimizeFIREStep,
+             py::arg("dt"), py::arg("alpha"), py::arg("nPos"),
+             py::arg("dtMax") = 0.1, py::arg("alphaStart") = 0.1,
+             py::arg("fAlpha") = 0.99, py::arg("fInc") = 1.1, py::arg("fDec") = 0.5,
+             py::arg("nMin") = 5, py::arg("shakeIter") = 5,
+             py::arg("rollbackRelTol") = 1e-10, py::arg("rollbackAbsTol") = 1e-14)
+        .def("minimizeFIRE", &Model::minimizeFIRE,
+             py::arg("maxForceThreshold"), py::arg("dtInit"), py::arg("maxSteps"),
+             py::arg("dtMax") = 0.1, py::arg("alphaStart") = 0.1,
+             py::arg("fAlpha") = 0.99, py::arg("fInc") = 1.1, py::arg("fDec") = 0.5,
+             py::arg("nMin") = 5, py::arg("shakeIter") = 5,
+             py::arg("rollbackRelTol") = 1e-10, py::arg("rollbackAbsTol") = 1e-14);
 }

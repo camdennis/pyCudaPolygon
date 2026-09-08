@@ -1,3 +1,18 @@
 pyCudaPolygon/__pycache__/
 build/
 tests/.ipynb_checkpoints/
+
+# build artifacts and vendored deps
+_deps/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.so
+*.egg-info/
+
+# LaTeX intermediates (keep .tex and .pdf)
+*.aux
+*.log
+*.out
+*.toc

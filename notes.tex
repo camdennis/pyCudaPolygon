@@ -1,0 +1,1082 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{mathtools}
+\usepackage{physics}
+\geometry{margin=1in}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\half}{\tfrac{1}{2}}
+\newcommand{\pderiv}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\avec}{\mathbf{a}}
+\newcommand{\fvec}{\mathbf{f}}
+\newcommand{\uvec}{\hat{\mathbf{u}}}
+\newcommand{\vvec}{\hat{\mathbf{v}}}
+\newcommand{\nvec}{\hat{\mathbf{n}}}
+\newcommand{\xvec}{\mathbf{x}}
+\DeclareMathOperator{\sgn}{sgn}
+\DeclareMathOperator{\atantwo}{atan2}
+
+\title{\textbf{Mathematical Notes: Rounded-Polygon Packing Model}\\[0.5em]
+\large Derivations of all algorithms in \texttt{pyCudaPolygon}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Overview}
+%% ============================================================
+
+This document gives step-by-step derivations of every piece of
+mathematics used in the \texttt{pyCudaPolygon} CUDA code for
+soft rounded-polygon packing.  The chain is:
+
+\begin{enumerate}
+  \item \textbf{Polygon geometry}: equilateral closed polygons, shape index.
+  \item \textbf{Rounded-polygon boundary}: inward arc rounding at each vertex.
+  \item \textbf{Arc geometry} (\texttt{computeArcGeom}): tangent points,
+        arc centre, angle span.
+  \item \textbf{Intersection area as energy}: Green's theorem applied to arcs
+        and straight edges.
+  \item \textbf{Force as gradient of intersection area}: analytic gradient
+        via the arc-geometry chain rule (\texttt{arcGeomGrad}).
+  \item \textbf{SHAKE}: simultaneous Newton-step constraint projection for
+        equilateral edge lengths and area.
+  \item \textbf{Force projection}: SVD + Gram–Schmidt to remove all
+        constraint-space force components.
+  \item \textbf{FIRE minimization}: velocity-Verlet FIRE with SHAKE rederivation.
+  \item \textbf{Shape generation}: SLSQP for random equilateral polygons with
+        prescribed shape index.
+  \item \textbf{Bidisperse packing setup}: area formulas from packing fraction
+        and perimeter ratio.
+\end{enumerate}
+
+Throughout, positions live in a periodic $[0,1)^2$ box with minimum-image convention
+\[
+  \mathrm{wrap}(x) = x - \lfloor x + \tfrac{1}{2} \rfloor.
+\]
+
+%% ============================================================
+\section{Polygon Geometry}
+%% ============================================================
+
+\subsection{Backbone polygon}
+
+A polygon $P$ with $N$ vertices is represented by its backbone vertices
+$\mathbf{a}_0, \mathbf{a}_1, \ldots, \mathbf{a}_{N-1} \in [0,1)^2$ (periodic box),
+traversed counterclockwise.  Edges are labelled $E_k$, running from $\mathbf{a}_k$
+to $\mathbf{a}_{k+1}$ (indices mod $N$).
+
+\subsubsection{Edge vectors}
+
+The (wrapped) edge vectors are
+\[
+  \mathbf{u}_k = \mathrm{wrap}(\mathbf{a}_k - \mathbf{a}_{k-1}), \qquad
+  \mathbf{v}_k = \mathrm{wrap}(\mathbf{a}_{k+1} - \mathbf{a}_k).
+\]
+Unit vectors: $\uvec_k = \mathbf{u}_k / |\mathbf{u}_k|$, \;
+$\vvec_k = \mathbf{v}_k / |\mathbf{v}_k|$.
+
+\subsubsection{Area (shoelace formula)}
+
+The signed area of the backbone polygon (positive for CCW) is
+\[
+  A_{\mathrm{bb}} = \frac{1}{2} \sum_{k=0}^{N-1}
+      \bigl(x_k\, y_{k+1} - x_{k+1}\, y_k\bigr),
+\]
+where $(x_k, y_k) = \mathbf{a}_k$ and all coordinates are interpreted in a
+single minimum-image frame anchored at $\mathbf{a}_0$.
+
+\subsubsection{Equilateral constraint}
+
+SHAKE enforces $|\mathbf{v}_k| = L_k = $ constant for all $k$.  When all $L_k = L$
+the polygon is \emph{equilateral} (equal edge lengths but not necessarily equiangular).
+
+\subsection{Shape index}
+
+For a polygon with perimeter $P = \sum_k L_k$ and backbone area $A$, the
+\emph{shape index} (also called the reduced perimeter) is
+\[
+  \kappa = \frac{P}{\sqrt{A}}.
+\]
+A circle has $\kappa = 2\sqrt{\pi} \approx 3.545$; a square has $\kappa = 4$;
+elongated or irregular shapes have larger $\kappa$.  In the bidisperse packing,
+we use $\kappa = 3.7$ for both polygon sizes.
+
+\subsection{Exterior angle at a vertex}
+
+At vertex $\mathbf{a}_k$ the incoming direction is $\uvec_k$ and the outgoing
+direction is $\vvec_k$.  Define
+\[
+  c_k = \uvec_k \times \vvec_k = (\hat u_x)(\hat v_y) - (\hat u_y)(\hat v_x), \qquad
+  d_k = \uvec_k \cdot \vvec_k = \hat u_x \hat v_x + \hat u_y \hat v_y.
+\]
+The \emph{exterior angle} (the angle you turn through at vertex $k$, positive for a
+left turn in a CCW polygon) is
+\[
+  \varphi_k = \mathrm{atan2}(c_k, d_k).
+\]
+For a convex polygon traversed CCW, $\varphi_k > 0$ for all $k$ and
+$\sum_k \varphi_k = 2\pi$.
+
+%% ============================================================
+\section{Rounded-Polygon Boundary}
+%% ============================================================
+
+\subsection{Inward arc rounding}
+
+At each vertex $\mathbf{a}_k$ we replace the sharp corner with a circular arc of
+radius $\delta > 0$.  The arc is tangent to both adjacent (original) edges and
+curves \emph{inward} (toward the polygon interior).  The resulting boundary
+alternates between straight edge sections and smooth arcs:
+
+\[
+  \partial \tilde P = K_0, E_0, K_1, E_1, \ldots, K_{N-1}, E_{N-1},
+\]
+where $K_k$ is the arc at vertex $\mathbf{a}_k$ and $E_k$ is the straight section
+of edge $k$ between adjacent tangent points.
+
+This is \textbf{not} the Minkowski sum $P \oplus D(\delta)$ (which rounds outward);
+it is instead an \emph{inscribed} rounding that cuts each corner.
+
+\subsection{Tangent points and arc centre}
+\label{sec:arcgeom}
+
+The following derivation corresponds exactly to \texttt{computeArcGeom} in
+\texttt{kernels.cuh}.
+
+\paragraph{Tangent set-back $\ell_k$.}
+The arc at $\mathbf{a}_k$ must be tangent to the incoming edge (direction $\uvec_k$)
+and to the outgoing edge (direction $\vvec_k$).  Let the tangent point on the incoming
+edge be $\mathbf{a}_k^- = \mathbf{a}_k - \ell_k \uvec_k$ and on the outgoing edge
+be $\mathbf{a}_k^+ = \mathbf{a}_k + \ell_k \vvec_k$.
+
+For a circle of radius $\delta$ centred at $\mathbf{z}_k$ to be tangent to the
+incoming edge at $\mathbf{a}_k^-$, we need:
+\[
+  (\mathbf{z}_k - \mathbf{a}_k^-) \perp \uvec_k \quad \text{and} \quad
+  |\mathbf{z}_k - \mathbf{a}_k^-| = \delta.
+\]
+By symmetry (same tangency condition on outgoing edge), $|\mathbf{z}_k - \mathbf{a}_k^+|
+= \delta$ as well.  The tangent-setback formula follows from the two perpendicularity
+conditions:
+
+Write $\mathbf{z}_k = \mathbf{a}_k + \alpha \uvec_k + \beta \nvec_k$ where
+$\nvec_k$ is a unit vector perpendicular to $\uvec_k$.  For the arc to be tangent to
+the incoming edge: the component of $(\mathbf{z}_k - \mathbf{a}_k^-)$ along $\uvec_k$
+must vanish:
+\[
+  \alpha + \ell_k = 0 \implies \alpha = -\ell_k.
+\]
+For the arc to be tangent to the outgoing edge (direction $\vvec_k$): the component of
+$(\mathbf{z}_k - \mathbf{a}_k^+)$ along $\vvec_k$ must vanish.  Writing
+$\vvec_k = d_k \uvec_k + c_k \nvec_k$ (resolved in the $\uvec_k$, $\nvec_k$ frame):
+\[
+  (-\ell_k - \ell_k d_k) + c_k \beta = 0 \implies
+  \beta = \frac{\ell_k (1 + d_k)}{c_k}.
+\]
+Using $|\mathbf{z}_k - \mathbf{a}_k^-| = \delta$:
+\[
+  \alpha^2 + \beta^2 - 2\alpha\ell_k + \ell_k^2 = \delta^2 \quad\Longrightarrow\quad
+  \ell_k^2 + \beta^2 = \delta^2.
+\]
+Since $\beta = \ell_k(1+d_k)/c_k$ and $\beta^2 = \delta^2 - \ell_k^2$:
+\[
+  \ell_k^2 \left[1 + \frac{(1+d_k)^2}{c_k^2}\right] = \delta^2 \quad\Longrightarrow\quad
+  \ell_k^2 \cdot \frac{c_k^2 + (1+d_k)^2}{c_k^2} = \delta^2.
+\]
+Expanding $c_k^2 + (1+d_k)^2 = 1 - d_k^2 + 1 + 2d_k + d_k^2 = 2(1 + d_k)$:
+\[
+  \ell_k^2 \cdot \frac{2(1+d_k)}{c_k^2} = \delta^2
+  \quad\Longrightarrow\quad
+  \boxed{\ell_k = \frac{\delta\, |c_k|}{1 + d_k} = \delta \tan\!\left(\frac{\varphi_k}{2}\right).}
+\]
+The last equality uses the half-angle identity $\tan(\varphi/2) = \sin\varphi/(1+\cos\varphi)$
+together with $|c_k| = \sin\varphi_k$, $d_k = \cos\varphi_k$.
+
+\paragraph{Validity condition.}
+For the tangent points to lie within the edges (so adjacent arcs do not overlap),
+we need $\ell_k + \ell_{k-1} < L_{k-1}$ for every edge $k-1$.  Since SHAKE maintains
+equilateral edges, a sufficient condition is
+\[
+  2\,\delta\,\tan\!\left(\frac{\varphi_k}{2}\right) < L \quad \text{for all } k.
+\]
+For a regular $N$-gon this gives $\delta < L/(2\tan(\pi/N))$.
+
+\paragraph{Arc centre.}
+From $\alpha = -\ell_k$ and $\beta = \ell_k(1+d_k)/c_k = \delta|c_k|/c_k = \delta\,\sgn(c_k)$:
+\[
+  \mathbf{z}_k = \mathbf{a}_k - \ell_k \uvec_k + \delta\,\sgn(c_k)\, \nvec_k.
+\]
+Using $\nvec_k = (-\hat u_y, \hat u_x)$ (the 90$^\circ$ CCW rotation of $\uvec_k$) and
+noting that for a CCW polygon $c_k > 0$, this simplifies to $\beta = \delta$, i.e.:
+\[
+  \mathbf{z}_k = \mathbf{a}_k - \ell_k \uvec_k + \delta\nvec_k.
+\]
+This can be rewritten as
+\[
+  \boxed{\mathbf{z}_k = \mathbf{a}_k + \frac{\delta(\vvec_k - \uvec_k)}{|c_k|},}
+\]
+which is what the code computes.  \emph{Proof}: $-\ell_k \uvec_k + \delta \nvec_k
+= -\frac{\delta|c_k|}{1+d_k}\uvec_k + \delta(-\hat u_y, \hat u_x)$.
+Meanwhile $(\vvec_k - \uvec_k)/|c_k|$: write $\vvec_k - \uvec_k = (d_k-1)\uvec_k + c_k\nvec_k$,
+so $(\vvec_k-\uvec_k)/|c_k| = (d_k-1)\uvec_k/|c_k| + \sgn(c_k)\nvec_k$.
+Multiplying by $\delta$: $\delta(d_k-1)/|c_k| \cdot \uvec_k + \delta\sgn(c_k)\nvec_k$.
+Since $(d_k-1)/|c_k| = -(1-d_k)/(|c_k|) = -(1+d_k-2)/(|c_k|)$\ldots a cleaner route:
+with $\varphi = \varphi_k$, $c = \sin\varphi$, $d = \cos\varphi$:
+\begin{align*}
+  \frac{\delta(\vvec-\uvec)}{|c|} &= \frac{\delta}{|\sin\varphi|}
+    \bigl[(\cos\varphi - 1)\uvec + \sin\varphi\,\nvec\bigr] \\
+  &= \delta\,\frac{\cos\varphi-1}{\sin\varphi}\,\uvec + \delta\,\nvec
+   = -\delta\tan\!\tfrac{\varphi}{2}\,\uvec + \delta\,\nvec
+   = -\ell_k\uvec_k + \delta\nvec_k.
+\end{align*}
+
+\paragraph{Arc angle span.}
+The arc runs from $\mathbf{a}_k^-$ to $\mathbf{a}_k^+$ centred at $\mathbf{z}_k$.
+The starting angle (angle of $\mathbf{a}_k^- - \mathbf{z}_k$ measured from the
+positive $x$-axis) is
+\[
+  \phi_{0,k} = \mathrm{atan2}\!\bigl(a^-_{k,y} - z_{k,y},\; a^-_{k,x} - z_{k,x}\bigr).
+\]
+The arc sweeps through $\Delta\varphi_k = \varphi_k$ (the exterior angle), i.e.\
+the arc spans exactly the same angle as the turn at the vertex.
+
+\subsection{Straight edge section}
+
+The edge section $E_k$ (the flat part of edge $k$) runs from $\mathbf{a}_k^+$ to
+$\mathbf{a}_{k+1}^-$, a straight line segment of length $L_k - \ell_k - \ell_{k+1}$.
+
+\subsection{Area of rounded polygon}
+
+The area of the inscribed rounded polygon $\tilde P$ is
+\[
+  A_{\tilde P} = A_{\mathrm{bb}} - \sum_{k=0}^{N-1} \Delta A_k,
+\]
+where $\Delta A_k$ is the area of the corner region removed at vertex $k$.  Each
+removed corner is the region bounded by the arc $K_k$ and the two straight segments
+from $\mathbf{a}_k$ to $\mathbf{a}_k^\pm$.  Its area is
+
+\[
+  \Delta A_k = \frac{1}{2}\ell_k^2 \tan\!\left(\frac{\varphi_k}{2}\right)
+              - \frac{1}{2}\delta^2(\varphi_k - \sin\varphi_k).
+\]
+\emph{Derivation}: The two triangles from $\mathbf{a}_k$ to the tangent points
+have total area $\frac{1}{2}\ell_k^2 \sin\varphi_k / \cos^2(\varphi_k/2)
+= \frac{1}{2}\ell_k^2\tan(\varphi_k/2)$ (using the tangency geometry).
+The circular sector subtracted is $\frac{1}{2}\delta^2\varphi_k$ and the triangles
+from $\mathbf{z}_k$ to $\mathbf{a}_k^\pm$ together contribute $\frac{1}{2}\delta^2\sin\varphi_k$.
+The net result is the formula above.
+
+%% ============================================================
+\section{Intersection Area as the Energy}
+%% ============================================================
+
+\subsection{Setup}
+
+For two rounded polygons $\tilde A$ and $\tilde B$ (corresponding to backbone polygons
+$A$ and $B$), the potential energy is
+\[
+  E_{AB} = \mathrm{Area}(\tilde A \cap \tilde B).
+\]
+The total energy is $E = \sum_{A < B} E_{AB}$ summed over interacting pairs.
+
+\subsection{Green's theorem}
+
+Green's theorem (the ``shoelace'' form) states that for a region $\Omega$ with
+boundary $\partial\Omega$ traversed counterclockwise,
+\[
+  \mathrm{Area}(\Omega) = \frac{1}{2}\oint_{\partial\Omega}
+    \bigl(x\,\dd y - y\,\dd x\bigr).
+\]
+We compute $\mathrm{Area}(\tilde A \cap \tilde B)$ by integrating over the boundary
+of $\tilde A \cap \tilde B$.  The intersection boundary consists of alternating arcs
+and straight segments from $\partial\tilde A$ and $\partial\tilde B$.
+
+\paragraph{Key decomposition.}
+Rather than assembling the full intersection boundary (which requires polygon clipping),
+the CUDA kernel decomposes the computation per feature of $\tilde A$:
+
+\begin{quote}
+For each feature $F$ of $\partial\tilde A$ (either arc $K_i$ or edge $E_i$):
+\begin{enumerate}
+  \item Clip $F$ against $\tilde B$: find the sub-intervals where $F$ lies \emph{inside}
+        $\tilde B$.
+  \item For each such sub-interval $[t_0, t_1]$, add the corresponding signed area
+        contribution $\delta\!\mathcal{A}$ to the energy.
+\end{enumerate}
+\end{quote}
+
+This is valid because, when we apply Green's theorem to $\tilde A \cap \tilde B$,
+the only contributions come from the parts of the boundary that lie inside the other
+shape.  Summing over all features of $\tilde A$ gives the full intersection area.
+(The contributions from $\partial\tilde B$ inside $\tilde A$ are captured when the
+roles of $A$ and $B$ are reversed; both halves are summed in the final accumulation
+via \texttt{atomicAdd}.)
+
+\subsection{Contribution from a straight edge segment}
+\label{sec:edge_contrib}
+
+Edge section $E_i$ runs from $\mathbf{a}_i^+ \equiv \mathbf{P}$ to
+$\mathbf{a}_{i+1}^- \equiv \mathbf{Q}$ parametrically as
+\[
+  \boldsymbol{\gamma}(t) = (1-t)\mathbf{P} + t\mathbf{Q}, \quad t \in [0,1].
+\]
+Suppose the sub-interval $[t_0, t_1]$ lies inside $\tilde B$, with endpoints
+$\mathbf{X}_0 = \boldsymbol{\gamma}(t_0)$ and $\mathbf{X}_1 = \boldsymbol{\gamma}(t_1)$.
+The Green's theorem integrand over this segment is
+\[
+  \dd\mathcal{A} = \frac{1}{2}(x\,\dd y - y\,\dd x).
+\]
+On the straight segment:
+\[
+  x = (1-t)P_x + tQ_x, \quad \dd x = (Q_x - P_x)\,\dd t,
+\]
+and similarly for $y$.  Therefore:
+\[
+  x\,\dd y - y\,\dd x = \bigl[(1-t)P_x + tQ_x\bigr](Q_y - P_y)\,\dd t
+                       - \bigl[(1-t)P_y + tQ_y\bigr](Q_x - P_x)\,\dd t.
+\]
+Integrating from $t_0$ to $t_1$:
+\begin{align*}
+  \delta\mathcal{A}_{\mathrm{edge}} &= \frac{1}{2}\int_{t_0}^{t_1}
+    \bigl[(1-t)(P_x Q_y - P_y Q_x) + t(Q_x P_y - Q_y P_x) \cdot (-1)
+    + \ldots\bigr]\,\dd t.
+\end{align*}
+After simplification, the result depends only on the \emph{endpoint coordinates}
+$\mathbf{X}_0$ and $\mathbf{X}_1$ of the inside sub-interval:
+\[
+  \boxed{
+  \delta\mathcal{A}_{\mathrm{edge}}([\mathbf{X}_0, \mathbf{X}_1])
+  = \frac{1}{2}\bigl(X_{0x}\,X_{1y} - X_{0y}\,X_{1x}\bigr).
+  }
+\]
+\emph{Proof}: For a straight segment from $\mathbf{X}_0$ to $\mathbf{X}_1$:
+$x = (1-s)X_{0x} + s X_{1x}$, $\dd x = (X_{1x} - X_{0x})\,\dd s$.  Then:
+\begin{align*}
+  \int_0^1 (x\,\dd y - y\,\dd x) &=
+  \int_0^1 \bigl[(1-s)X_{0x} + sX_{1x}\bigr](X_{1y}-X_{0y})\,\dd s \\
+  &\quad - \int_0^1\bigl[(1-s)X_{0y}+sX_{1y}\bigr](X_{1x}-X_{0x})\,\dd s \\
+  &= \tfrac{1}{2}(X_{0x}+X_{1x})(X_{1y}-X_{0y})
+    - \tfrac{1}{2}(X_{0y}+X_{1y})(X_{1x}-X_{0x}) \\
+  &= X_{0x}X_{1y} - X_{0y}X_{1x}.
+\end{align*}
+This matches the kernel line: \texttt{localEnergy += 0.5*(X0x*X1y - X0y*X1x)}.
+
+\subsection{Contribution from an arc segment}
+\label{sec:arc_contrib}
+
+Arc $K_i$ at vertex $\mathbf{a}_i$ is a circle of radius $\delta$ centred at
+$\mathbf{z}_i$, parametrised by
+\[
+  \boldsymbol{\gamma}(\tau) = \mathbf{z}_i + \delta\bigl(\cos(\phi_{0,i} + \tau\Delta\varphi_i),\;
+                                         \sin(\phi_{0,i} + \tau\Delta\varphi_i)\bigr),
+  \quad \tau \in [0,1].
+\]
+Suppose the inside sub-interval is $[\tau_0, \tau_1]$ with endpoints $\mathbf{X}_0$,
+$\mathbf{X}_1$ and spanning angle $\Delta\psi = (\tau_1 - \tau_0)\Delta\varphi_i$.
+
+The Green's integrand on a circle of radius $\delta$ centred at $\mathbf{z}$:
+\[
+  x\,\dd y - y\,\dd x = (z_x + \delta\cos\phi)(-\delta\sin\phi\,\dd\phi)
+    - (z_y + \delta\sin\phi)(\delta\cos\phi\,\dd\phi)
+  = -\delta\bigl(z_x\sin\phi + z_y\cos\phi + \delta\bigr)\,\dd\phi.
+\]
+Integrate from $\phi_0 = \phi_{0,i} + \tau_0\Delta\varphi_i$ to
+$\phi_1 = \phi_{0,i} + \tau_1\Delta\varphi_i$:
+\[
+  \int (x\,\dd y - y\,\dd x)
+    = \delta\bigl[z_x\cos\phi - z_y\sin\phi\bigr]_{\phi_0}^{\phi_1}
+    - \delta^2(\phi_1 - \phi_0).
+\]
+Using $\delta\cos\phi_{0/1} = X_{0/1,x} - z_x$ and $\delta\sin\phi_{0/1} = X_{0/1,y} - z_y$:
+\begin{align*}
+  \int (x\,\dd y - y\,\dd x)
+  &= z_x(X_{1x}-z_x) - z_y(X_{1y}-z_y) - z_x(X_{0x}-z_x) + z_y(X_{0y}-z_y)
+     - \delta^2\Delta\psi \\
+  &= z_x(X_{1x} - X_{0x}) - z_y(X_{1y} - X_{0y}) - \delta^2\Delta\psi.
+\end{align*}
+We can write $z_x X_{1x} - z_x X_{0x} = X_{0x}X_{1y} - X_{0y}X_{1x}
++ z_x(X_{1x}-X_{0x}) - z_y(X_{1y}-X_{0y}) + \ldots$ — it's cleaner to
+directly compute.  The shoelace contribution for the chord plus the circular cap:
+\[
+  \mathrm{Area}(\text{arc sector}) = \frac{1}{2}(X_{0x}X_{1y} - X_{0y}X_{1x})
+  + \frac{1}{2}\delta^2(\Delta\psi - \sin\Delta\psi).
+\]
+\emph{Derivation}: The signed area swept by the arc from $\mathbf{X}_0$ to $\mathbf{X}_1$
+centred at $\mathbf{z}$ can be split into (i) the triangle $\mathbf{0}$–$\mathbf{X}_0$–$\mathbf{X}_1$
+with area $\frac{1}{2}(X_{0x}X_{1y}-X_{0y}X_{1x})$ and (ii) the circular
+segment (area enclosed between the chord $\mathbf{X}_0\mathbf{X}_1$ and the arc).
+The circular segment area is $\frac{1}{2}\delta^2(\Delta\psi - \sin\Delta\psi)$.
+Combining:
+\[
+  \boxed{
+  \delta\mathcal{A}_{\mathrm{arc}} = \frac{1}{2}\bigl(X_{0x}X_{1y} - X_{0y}X_{1x}\bigr)
+  + \frac{1}{2}\delta^2(\Delta\psi - \sin\Delta\psi).
+  }
+\]
+This matches the kernel lines:
+\begin{verbatim}
+  localEnergy += 0.5*(X0x*X1y - X0y*X1x)
+               + 0.5*delta*delta*(dpsi - sin(dpsi));
+\end{verbatim}
+
+\subsection{Point-in-smoothed-polygon test}
+
+To determine whether a midpoint of a feature segment lies inside $\tilde B$, the
+code uses a horizontal ray-casting algorithm (\texttt{pipSmoothed}).  A horizontal
+ray from point $(p_x, p_y)$ toward $+x$ is cast, and the number of crossings with
+$\partial\tilde B$ (both arc and straight segments) is counted.  An odd count means
+the point is inside.
+
+For a straight edge from $\mathbf{b}^+_j$ to $\mathbf{b}^-_{j+1}$: standard
+ray–segment crossing test.
+
+For an arc at vertex $j$ with centre $(z_x, z_y)$, radius $\delta$: the ray
+$y = p_y$ intersects the circle at $x = z_x \pm \sqrt{\delta^2 - (p_y - z_y)^2}$
+(if the discriminant is non-negative).  Each intersection is checked to lie on the
+arc (i.e., the corresponding angle $\phi = \mathrm{atan2}(p_y - z_y, x - z_x)$ falls
+in the arc range $[\phi_0, \phi_0 + \Delta\varphi]$) and to satisfy $x > p_x$.
+
+\subsection{Finding intersections}
+
+\subsubsection{Arc–edge intersection (\texttt{isectArcEdge})}
+
+Arc: centre $\mathbf{z}$, radius $\delta$, angles $[\phi_0, \phi_0 + \Delta\varphi]$.
+Edge: from $\mathbf{p}$ to $\mathbf{q}$, parametrised as $\mathbf{r}(t) = \mathbf{p} + t\mathbf{e}$,
+$\mathbf{e} = \mathbf{q} - \mathbf{p}$, $t \in (0,1)$.
+
+Substituting into the circle equation $|\mathbf{r} - \mathbf{z}|^2 = \delta^2$:
+\[
+  |\mathbf{e}|^2 t^2 + 2(\mathbf{f}\cdot\mathbf{e})\,t + |\mathbf{f}|^2 - \delta^2 = 0,
+  \quad \mathbf{f} = \mathbf{p} - \mathbf{z}.
+\]
+\[
+  a = |\mathbf{e}|^2, \quad b = 2(\mathbf{f}\cdot\mathbf{e}), \quad
+  c = |\mathbf{f}|^2 - \delta^2, \quad \Delta = b^2 - 4ac.
+\]
+Roots $t = (-b \pm \sqrt{\Delta})/(2a)$ (when $\Delta \geq 0$).  Each root with
+$t \in (0,1)$ is an intersection; check that the corresponding point lies on the arc.
+
+\subsubsection{Arc–arc intersection (\texttt{isectArcArc})}
+
+Two circles of radii $\delta_A$, $\delta_B$ centred at $\mathbf{z}_A$, $\mathbf{z}_B$.
+Let $d = |\mathbf{z}_B - \mathbf{z}_A|$.  The intersection points (up to 2) lie on the
+radical axis at distance $a_2 = (d^2 + \delta_A^2 - \delta_B^2)/(2d)$ from $\mathbf{z}_A$,
+with perpendicular offset $h = \sqrt{\max(0, \delta_A^2 - a_2^2)}$:
+\[
+  \mathbf{X} = \mathbf{z}_A + a_2 \hat{\mathbf{s}} \pm h\,\hat{\mathbf{s}}^\perp,
+  \quad \hat{\mathbf{s}} = (\mathbf{z}_B - \mathbf{z}_A)/d.
+\]
+Each candidate is checked against both arc angle ranges.
+
+\subsubsection{Edge–edge intersection (\texttt{isectEdgeEdge})}
+
+Lines $\mathbf{p} + t\mathbf{d}$ and $\mathbf{r} + s\mathbf{e}$:
+\[
+  t = \frac{(\mathbf{r}-\mathbf{p})\times\mathbf{e}}{\mathbf{d}\times\mathbf{e}},
+  \quad
+  s = \frac{(\mathbf{r}-\mathbf{p})\times\mathbf{d}}{\mathbf{d}\times\mathbf{e}},
+\]
+where $\mathbf{a}\times\mathbf{b} = a_x b_y - a_y b_x$.  Intersection if $t, s \in (0,1)$.
+
+%% ============================================================
+\section{Force as Gradient of Intersection Area}
+%% ============================================================
+
+The force on vertex $\mathbf{a}_\alpha$ is
+\[
+  \mathbf{F}_\alpha = -\pderiv{E}{\mathbf{a}_\alpha}.
+\]
+We differentiate $E = \mathrm{Area}(\tilde A \cap \tilde B)$ using the Leibniz
+rule for integrals whose limits and integrands both depend on the parameters.
+
+\subsection{General Leibniz rule for signed area}
+
+Consider a smooth arc $\boldsymbol{\gamma}(t;\,\boldsymbol{\theta})$ parameterised by
+$t\in[t_0(\boldsymbol{\theta}), t_1(\boldsymbol{\theta})]$ where $\boldsymbol{\theta}$
+are the polygon vertex coordinates.  The signed area contribution is
+\[
+  \mathcal{I}(\boldsymbol{\theta})
+  = \frac{1}{2}\int_{t_0}^{t_1}
+    \bigl(\gamma_x \dot\gamma_y - \gamma_y \dot\gamma_x\bigr)\,\dd t.
+\]
+Differentiating with respect to $\boldsymbol{\theta}$:
+\begin{align}
+  \pderiv{\mathcal{I}}{\boldsymbol{\theta}}
+  &= \frac{1}{2}\int_{t_0}^{t_1}
+     \pderiv{}{\boldsymbol{\theta}}\bigl(\gamma_x\dot\gamma_y - \gamma_y\dot\gamma_x\bigr)\,\dd t
+  \notag\\
+  &\quad+ \frac{1}{2}\bigl(\gamma_x(t_1)\dot\gamma_y(t_1)-\gamma_y(t_1)\dot\gamma_x(t_1)\bigr)
+     \pderiv{t_1}{\boldsymbol{\theta}}
+  \notag\\
+  &\quad- \frac{1}{2}\bigl(\gamma_x(t_0)\dot\gamma_y(t_0)-\gamma_y(t_0)\dot\gamma_x(t_0)\bigr)
+     \pderiv{t_0}{\boldsymbol{\theta}}.
+  \label{eq:leibniz}
+\end{align}
+
+The first term is the \textbf{direct gradient} (how the curve itself moves with
+$\boldsymbol{\theta}$, holding limits fixed).  The second and third terms are
+\textbf{boundary gradient} contributions: the intersection boundary endpoints move
+as the polygon vertices change, shifting the limits of integration.
+
+\subsection{Gradient for a straight edge segment}
+
+For the edge section $E_i$ (from $\mathbf{P} = \mathbf{a}_i^+$ to $\mathbf{Q} = \mathbf{a}_{i+1}^-$)
+with inside sub-interval $[\mathbf{X}_0, \mathbf{X}_1]$, the energy contribution is
+$\mathcal{I} = \frac{1}{2}(X_{0x}X_{1y} - X_{0y}X_{1x})$.
+
+\paragraph{Direct term.}
+The segment points are $\boldsymbol{\gamma}(t) = (1-t)\mathbf{P} + t\mathbf{Q}$.
+The sub-interval endpoints are $\mathbf{X}_0 = \boldsymbol{\gamma}(t_0)$,
+$\mathbf{X}_1 = \boldsymbol{\gamma}(t_1)$.  When $\mathbf{P}$ or $\mathbf{Q}$ moves,
+all points on the segment move.  The force on $\mathbf{P}$ from the direct term is:
+\[
+  \pderiv{\mathcal{I}}{\mathbf{P}}\bigg|_{\text{direct}}
+  = \frac{\partial}{\partial\mathbf{P}}\bigl[\tfrac{1}{2}(X_{0x}X_{1y}-X_{0y}X_{1x})\bigr]
+    = \frac{1}{2}\bigl[(1-t_0)\,\frac{\partial X_{0x}}{\partial P_x} X_{1y} - \ldots\bigr].
+\]
+More concisely, define $\mathbf{f}_0 = \frac{1}{2}(X_{1y}, -X_{1x})$ and
+$\mathbf{f}_1 = \frac{1}{2}(-X_{0y}, X_{0x})$.  Then:
+\begin{align*}
+  \pderiv{\mathcal{I}}{\mathbf{P}}\bigg|_{\text{direct}}
+    &= (1-t_0)\,\mathbf{f}_0 + (1-t_1)\,\mathbf{f}_1, \\
+  \pderiv{\mathcal{I}}{\mathbf{Q}}\bigg|_{\text{direct}}
+    &= t_0\,\mathbf{f}_0 + t_1\,\mathbf{f}_1.
+\end{align*}
+Here the factors $(1-t)$ and $t$ are the barycentric weights of $\mathbf{P}$ and $\mathbf{Q}$
+in $\boldsymbol{\gamma}(t)$.
+
+\paragraph{Boundary (limit) term.}
+When the endpoints $t_{0,1}$ themselves change (because a crossing parameter
+depends on $\mathbf{P}$ or $\mathbf{Q}$), we get an additional contribution.
+
+Consider an edge–edge crossing at parameter $t_0$: the edge of $\tilde A$ (direction
+$\mathbf{e}_A = \mathbf{Q}-\mathbf{P}$) crosses an edge of $\tilde B$ (direction $\mathbf{e}_B$)
+with $t_0 = (\mathbf{f}\times\mathbf{e}_B)/(\mathbf{e}_A\times\mathbf{e}_B)$.  Then:
+\[
+  \pderiv{t_0}{\mathbf{P}} = \frac{-\mathbf{e}_B^\perp + t_0\,\mathbf{e}_A^\perp}
+                            {\mathbf{e}_A\times\mathbf{e}_B}
+  \quad\text{(2-component vector).}
+\]
+(Here $\mathbf{v}^\perp = (-v_y, v_x)$ is the 90$^\circ$ CCW rotation.)
+The Leibniz boundary contribution from $t_0$ is
+\[
+  \pderiv{\mathcal{I}}{t_0}\cdot\pderiv{t_0}{\mathbf{P}}
+  = \frac{1}{2}(\mathbf{e}_A\times\mathbf{X}_1)\cdot\pderiv{t_0}{\mathbf{P}},
+\]
+and similarly for $t_1$.  In the code these are the ``$\beta$-correction'' terms.
+
+\subsection{Gradient for an arc segment}
+
+For arc $K_i$ with inside sub-interval $[\tau_0, \tau_1]$, the energy contribution is
+\[
+  \mathcal{I} = \frac{1}{2}(X_{0x}X_{1y} - X_{0y}X_{1x})
+              + \frac{1}{2}\delta^2(\Delta\psi - \sin\Delta\psi),
+  \quad \Delta\psi = (\tau_1-\tau_0)\Delta\varphi_i.
+\]
+The arc itself $\boldsymbol{\gamma}(\tau) = \mathbf{z}_i + \delta(\cos\phi(\tau),\sin\phi(\tau))$
+moves when the backbone vertices move (because $\mathbf{z}_i$, $\phi_{0,i}$, and $\Delta\varphi_i$
+all depend on three vertices: $\mathbf{a}_{i-1}$, $\mathbf{a}_i$, $\mathbf{a}_{i+1}$).
+Only the arc \emph{endpoints} $\tau = 0$ ($\mathbf{a}_i^-$) and $\tau = 1$ ($\mathbf{a}_i^+$)
+generate simple direct-term gradients (for interior crossings the arc is circular and
+a separate chain rule through \texttt{arcGeomGrad} is needed).
+
+\subsection{Arc geometry chain rule (\texttt{arcGeomGrad})}
+\label{sec:arcgeomgrad}
+
+The function \texttt{arcGeomGrad} computes, given:
+\begin{itemize}
+  \item $\pderiv{E}{\mathbf{a}_i^-}$ (force on the tangent point from the incoming edge),
+  \item $\pderiv{E}{\mathbf{a}_i^+}$ (force on the tangent point from the outgoing edge),
+  \item $\pderiv{E}{\Delta\varphi_i}$ (sensitivity to the arc span),
+\end{itemize}
+the resulting forces on backbone vertices $\mathbf{a}_{i-1}$, $\mathbf{a}_i$, $\mathbf{a}_{i+1}$.
+
+The chain rule:
+\begin{align*}
+  \pderiv{E}{\mathbf{a}_{i-1}} &= \pderiv{E}{\mathbf{a}_i^-}\cdot\pderiv{\mathbf{a}_i^-}{\mathbf{a}_{i-1}}
+    + \pderiv{E}{\Delta\varphi_i}\cdot\pderiv{\Delta\varphi_i}{\mathbf{a}_{i-1}}, \\
+  \pderiv{E}{\mathbf{a}_i} &= \pderiv{E}{\mathbf{a}_i^-}\cdot\pderiv{\mathbf{a}_i^-}{\mathbf{a}_i}
+    + \pderiv{E}{\mathbf{a}_i^+}\cdot\pderiv{\mathbf{a}_i^+}{\mathbf{a}_i}
+    + \pderiv{E}{\Delta\varphi_i}\cdot\pderiv{\Delta\varphi_i}{\mathbf{a}_i}, \\
+  \pderiv{E}{\mathbf{a}_{i+1}} &= \pderiv{E}{\mathbf{a}_i^+}\cdot\pderiv{\mathbf{a}_i^+}{\mathbf{a}_{i+1}}
+    + \pderiv{E}{\Delta\varphi_i}\cdot\pderiv{\Delta\varphi_i}{\mathbf{a}_{i+1}}.
+\end{align*}
+
+\paragraph{Partial derivatives of $\ell_i$.}
+$\ell_i = \delta|c_i|/(1+d_i)$ with $c_i = \uvec_i\times\vvec_i$, $d_i = \uvec_i\cdot\vvec_i$.
+
+Differentiating $\ell$ with respect to $\hat{\mathbf{u}}$ and $\hat{\mathbf{v}}$:
+\[
+  \pderiv{\ell}{\hat u_x} = \frac{1}{1+d}\bigl(\sgn(c)\,\delta\,\hat v_y - \ell\,\hat v_x\bigr),
+  \quad
+  \pderiv{\ell}{\hat u_y} = \frac{1}{1+d}\bigl(-\sgn(c)\,\delta\,\hat v_x - \ell\,\hat v_y\bigr),
+\]
+and similarly for $\pderiv{\ell}{\hat{\mathbf{v}}}$ (swap $\uvec \leftrightarrow \vvec$ with sign changes).
+
+\paragraph{Partials of $\Delta\varphi_i$.}
+$\Delta\varphi_i = \mathrm{atan2}(c_i, d_i)$.  Using $c^2 + d^2 = 1$:
+\[
+  \pderiv{\Delta\varphi}{\hat u_x} = d\hat v_y - c\hat v_x,
+  \quad
+  \pderiv{\Delta\varphi}{\hat u_y} = -d\hat v_x - c\hat v_y,
+\]
+and similarly for $\hat{\mathbf{v}}$.
+
+\paragraph{Partials of $\hat{\mathbf{u}}$ with respect to $\mathbf{a}_{i-1}$ and $\mathbf{a}_i$.}
+$\hat{\mathbf{u}} = \mathbf{u}/|\mathbf{u}|$ with $\mathbf{u} = \mathbf{a}_i - \mathbf{a}_{i-1}$.
+\[
+  \pderiv{\hat u_j}{a_{i,k}} = \frac{\delta_{jk} - \hat u_j \hat u_k}{|\mathbf{u}|},
+  \qquad
+  \pderiv{\hat u_j}{a_{i-1,k}} = -\frac{\delta_{jk} - \hat u_j \hat u_k}{|\mathbf{u}|}.
+\]
+
+Combining, the code computes (after careful algebraic simplification) the four
+output force contributions:
+\[
+  \mathbf{f}_{i-1} = -\pderiv{E}{\mathbf{u}} / |\mathbf{u}|, \qquad
+  \mathbf{f}_i = \mathbf{f}^{\mathrm{am}} + \mathbf{f}^{\mathrm{ap}}
+    + \pderiv{E}{\mathbf{u}}/|\mathbf{u}| - \pderiv{E}{\mathbf{v}}/|\mathbf{v}|, \qquad
+  \mathbf{f}_{i+1} = \pderiv{E}{\mathbf{v}} / |\mathbf{v}|,
+\]
+where $\pderiv{E}{\mathbf{u}} = \bigl(\pderiv{E}{\hat{\mathbf{u}}} - (\pderiv{E}{\hat{\mathbf{u}}}\cdot\uvec)\uvec\bigr)/|\mathbf{u}|$
+is the force projected perpendicular to $\uvec$ (since $|\hat{\mathbf{u}}|=1$).
+
+%% ============================================================
+\section{SHAKE Constraint Projection}
+%% ============================================================
+
+\subsection{Constraints}
+
+For polygon $p$ with $n$ vertices $\{\mathbf{x}_0,\ldots,\mathbf{x}_{n-1}\}$ there are
+$n+1$ holonomic constraints:
+\begin{align}
+  C_k(\mathbf{x}) &= |\mathbf{x}_{k+1} - \mathbf{x}_k| - L_k = 0, \quad k = 0,\ldots,n-1, \\
+  C_n(\mathbf{x}) &= A(\mathbf{x}) - A_0 = 0.
+\end{align}
+The constraint Jacobian $J \in \R^{(n+1)\times 2n}$ has rows $\nabla_\mathbf{x} C_k$.
+
+\subsection{Newton step}
+
+SHAKE applies one Newton step per iteration to drive all constraints to zero simultaneously.
+
+The Newton step is: find $\boldsymbol{\lambda} \in \R^{n+1}$ solving
+\[
+  (J J^\top)\,\boldsymbol{\lambda} = \mathbf{C}(\mathbf{x}),
+\]
+then apply the position update
+\[
+  \Delta\mathbf{x} = -J^\top\boldsymbol{\lambda}.
+\]
+
+\subsection{Jacobian structure}
+
+\paragraph{Edge constraints.}
+Let $\hat{\mathbf{e}}_k = (\mathbf{x}_{k+1} - \mathbf{x}_k)/|\mathbf{x}_{k+1}-\mathbf{x}_k|$
+be the unit edge vector.  Then:
+\[
+  \nabla_{\mathbf{x}_k} C_k = -\hat{\mathbf{e}}_k, \qquad
+  \nabla_{\mathbf{x}_{k+1}} C_k = +\hat{\mathbf{e}}_k, \qquad
+  \nabla_{\mathbf{x}_j} C_k = \mathbf{0} \text{ for } j \neq k, k+1.
+\]
+
+\paragraph{Area constraint.}
+The shoelace formula gives $\nabla_{\mathbf{x}_k} A$.  Using $\mathbf{x}_0$ as reference and
+wrapping all other positions:
+\begin{align*}
+  \pderiv{A}{x_k} &= \tfrac{1}{2}(y_{k+1} - y_{k-1}), \\
+  \pderiv{A}{y_k} &= \tfrac{1}{2}(x_{k-1} - x_{k+1}).
+\end{align*}
+Denote this gradient vector $\mathbf{g}_k = \nabla_{\mathbf{x}_k} A$.
+
+\subsection{Gram matrix $JJ^\top$}
+
+The $(n+1)\times(n+1)$ matrix $M = JJ^\top$ has entries $M_{ij} = \nabla C_i \cdot \nabla C_j$.
+
+\begin{itemize}
+  \item \textbf{Diagonal, edge–edge}: $M_{kk} = |\nabla_\mathbf{x} C_k|^2 = 2$
+        (the gradient has one $-\hat{\mathbf{e}}_k$ and one $+\hat{\mathbf{e}}_k$, total squared norm $2$).
+  \item \textbf{Off-diagonal, adjacent edges} ($j = k\pm 1\mod n$):
+        The only shared vertex between $C_k$ and $C_{k+1}$ is $\mathbf{x}_{k+1}$.
+        \[M_{k,k+1} = \nabla C_k|_{\mathbf{x}_{k+1}} \cdot \nabla C_{k+1}|_{\mathbf{x}_{k+1}}
+          = \hat{\mathbf{e}}_k \cdot (-\hat{\mathbf{e}}_{k+1}) = -\hat{\mathbf{e}}_k \cdot \hat{\mathbf{e}}_{k+1}.\]
+  \item \textbf{Off-diagonal, non-adjacent edges}: $M_{k,j} = 0$ for $|k-j| > 1$ (mod $n$,
+        except for cyclic adjacency).
+  \item \textbf{Area row and column}: $M_{n,k} = M_{k,n} = \nabla C_k \cdot \nabla C_n$.
+        \[M_{n,k} = -\hat{\mathbf{e}}_k\cdot\mathbf{g}_k + \hat{\mathbf{e}}_k\cdot\mathbf{g}_{k+1}
+          = \hat{\mathbf{e}}_k\cdot(\mathbf{g}_{k+1}-\mathbf{g}_k).\]
+  \item \textbf{Area diagonal}: $M_{n,n} = |\nabla_\mathbf{x} A|^2 = \sum_k |\mathbf{g}_k|^2$.
+\end{itemize}
+
+\subsection{LU solve and position update}
+
+The $(n+1)\times(n+1)$ system $M\boldsymbol{\lambda} = \mathbf{C}$ is solved by LU factorization
+(no pivoting, as $M$ is typically well-conditioned for equilateral polygons).  Then:
+\[
+  \Delta x_k = \lambda_k\,\hat e_{k,x} - \lambda_{k-1}\,\hat e_{k-1,x} - \lambda_n g_{k,x},
+\]
+\[
+  \Delta y_k = \lambda_k\,\hat e_{k,y} - \lambda_{k-1}\,\hat e_{k-1,y} - \lambda_n g_{k,y}.
+\]
+(Thread $k$ handles vertex $k$; all threads run in parallel within one block.)
+
+\subsection{Convergence}
+
+Convergence is checked by $\max_k |C_k(\mathbf{x})| < \mathrm{tol}$ after each
+iteration, with $\mathrm{tol} = 10^{-15}$.  Up to \texttt{maxIter} iterations are
+applied.  If \texttt{maxIter} is reached, the code retries with $10\times$ more
+iterations; if it still fails, the FIRE step is rejected (positions reverted).
+
+%% ============================================================
+\section{Force Projection}
+%% ============================================================
+
+\subsection{Goal}
+
+After computing the overlap force $\mathbf{F}$, we project out all components that
+lie in the \emph{constraint subspace} (the span of the constraint gradients).  This
+ensures FIRE moves the system along the constraint manifold, not toward constraint
+violations.
+
+The projection onto the orthogonal complement of the constraint subspace is:
+\[
+  \mathbf{F}_\perp = \mathbf{F} - J^\top (J J^\top)^{-1} J\, \mathbf{F},
+\]
+where $J$ is the $(n+1)\times 2n$ constraint Jacobian.
+
+\subsection{Edge gradient matrix and SVD}
+
+\paragraph{Build $G$ (\texttt{buildEdgeGradMatrixKernel}).}
+For each polygon, construct the $n \times 2n$ matrix $G$ where row $k$ is the
+gradient of the $k$-th edge constraint:
+\[
+  G_{k, 2k}   = -\hat e_{k,x}, \quad G_{k, 2k+1} = -\hat e_{k,y}, \quad
+  G_{k, 2(k+1)} = +\hat e_{k,x}, \quad G_{k, 2(k+1)+1} = +\hat e_{k,y},
+\]
+all other entries zero.
+
+\paragraph{SVD (\texttt{cusolverDnDgesvdaStridedBatched}).}
+Compute $G = U \Sigma V^\top$ where $U \in \R^{2n\times n}$ and $V \in \R^{n\times n}$.
+The columns $\mathbf{u}_1,\ldots,\mathbf{u}_n$ of $U$ are the left singular vectors
+and span the range of $G^\top$, i.e.\ the constraint subspace.
+
+\paragraph{Projection using $U$.}
+Because $G^\top(G G^\top)^{-1}G = U U^\top$ (when $G$ has full row rank):
+\[
+  \mathbf{F}_{\perp,\mathrm{edge}} = \mathbf{F} - U U^\top \mathbf{F}
+  = \mathbf{F} - \sum_{j=1}^n (\mathbf{u}_j \cdot \mathbf{F})\,\mathbf{u}_j.
+\]
+
+\subsection{Area gradient orthogonalisation (\texttt{gramSchmidtAreaKernel})}
+
+The area gradient $\mathbf{g}_A = \nabla_\mathbf{x} A$ (stored in the \texttt{constraints}
+array) is not generally in the span of the edge gradients.  We Gram–Schmidt orthogonalise
+$\mathbf{g}_A$ against the columns of $U$:
+\[
+  \tilde{\mathbf{g}}_A = \mathbf{g}_A - \sum_{j=1}^n (\mathbf{u}_j \cdot \mathbf{g}_A)\,\mathbf{u}_j,
+\]
+then normalise:
+\[
+  \hat{\mathbf{q}}_A = \tilde{\mathbf{g}}_A / |\tilde{\mathbf{g}}_A|.
+\]
+This is the unit vector in the constraint subspace direction corresponding to the area
+constraint, orthogonal to all edge constraint directions.
+
+\subsection{Full force projection (\texttt{forceProjectFullKernel})}
+
+Project out both edge and area components:
+\[
+  \mathbf{F}_\perp = \mathbf{F}
+    - \sum_{j=1}^n (\mathbf{u}_j \cdot \mathbf{F})\,\mathbf{u}_j
+    - (\hat{\mathbf{q}}_A \cdot \mathbf{F})\,\hat{\mathbf{q}}_A.
+\]
+The result $\mathbf{F}_\perp$ has no component in the direction of any constraint
+gradient, so FIRE will not drive constraint violations.
+
+%% ============================================================
+\section{FIRE Minimization}
+%% ============================================================
+
+\subsection{Background}
+
+FIRE (Fast Inertial Relaxation Engine, Bitzek \textit{et al.}\ 2006) is a molecular
+dynamics–based minimizer that uses an inertial term to accelerate convergence toward
+energy minima.  The key idea is to run a modified velocity-Verlet integrator and
+periodically align the velocity vector with the force direction.
+
+\subsection{Velocity-Verlet integration}
+
+For a particle at position $\mathbf{x}$ with velocity $\mathbf{v}$ and force $\mathbf{F}$:
+
+\begin{enumerate}
+  \item \textbf{Half-velocity update} (\texttt{updatePositionAndVelocityFIREKernel}, first half):
+  \[
+    \mathbf{v}^{n+1/2} = \mathbf{v}^n + \tfrac{1}{2}\mathbf{F}^n\,\dd t,
+  \]
+  \item \textbf{Position update} (same kernel):
+  \[
+    \mathbf{x}^{n+1} = \mathbf{x}^n + \mathbf{v}^{n+1/2}\,\dd t + \tfrac{1}{2}\mathbf{F}^n(\dd t)^2
+                     = \mathbf{x}^n + \mathbf{v}^n \dd t + \tfrac{1}{2}\mathbf{F}^n(\dd t)^2,
+  \]
+  followed by periodic wrap $x \mapsto x - \lfloor x\rfloor$.
+  \item \textbf{SHAKE}: project $\mathbf{x}^{n+1}$ onto the constraint manifold.
+  \item \textbf{Velocity rederivation} (\texttt{rederiveVelocityFromDisplacementKernel}):
+  after SHAKE may move positions significantly, the velocity is rederived from the
+  actual displacement:
+  \[
+    \mathbf{v}^{n+1/2}_{\mathrm{redep}} = \mathrm{wrap}(\mathbf{x}^{n+1}_{\mathrm{SHAKE}} - \mathbf{x}^n) / \dd t.
+  \]
+  \item \textbf{Force and projection}: compute $\mathbf{F}^{n+1}$ via
+  \texttt{updateForceEnergyRounded} + \texttt{projectForce}.
+  \item \textbf{Second half-velocity update} (\texttt{updateVelocityFIREKernel}):
+  \[
+    \mathbf{v}^{n+1} = \mathbf{v}^{n+1/2}_{\mathrm{redep}} + \tfrac{1}{2}\mathbf{F}^{n+1}\,\dd t.
+  \]
+\end{enumerate}
+
+\subsection{FIRE steering}
+
+After each step, compute the \emph{power}:
+\[
+  P = \mathbf{F}^{n+1} \cdot \mathbf{v}^{n+1}.
+\]
+
+\paragraph{If $P > 0$ (moving toward lower energy):}
+\begin{enumerate}
+  \item Bend velocity toward force direction:
+  \[
+    \mathbf{v} \leftarrow (1-\alpha)\,\mathbf{v}
+               + \alpha\,\frac{|\mathbf{v}|}{|\mathbf{F}|}\,\mathbf{F}.
+  \]
+  \item Increment $n_+$ (the count of consecutive positive-power steps).
+  If $n_+ \geq n_{\min}$, increase $\dd t$:
+  \[
+    \dd t \leftarrow \min(\dd t \cdot f_{\mathrm{inc}},\; \dd t_{\max}),
+    \qquad \alpha \leftarrow \alpha \cdot f_\alpha.
+  \]
+\end{enumerate}
+
+\paragraph{If $P \leq 0$ (moving uphill):}
+\begin{enumerate}
+  \item Zero the velocity: $\mathbf{v} \leftarrow \mathbf{0}$.
+  \item Decrease $\dd t$:
+  \[
+    \dd t \leftarrow \dd t \cdot f_{\mathrm{dec}}.
+  \]
+  \item Reset $\alpha \leftarrow \alpha_{\mathrm{start}}$, $n_+ \leftarrow 0$.
+\end{enumerate}
+
+\paragraph{Parameters (defaults used in the packing test):}
+\begin{center}
+\begin{tabular}{lll}
+  Parameter & Symbol & Value \\
+  \hline
+  Initial time step & $\dd t_0$ & $10^{-3}$ \\
+  Maximum time step & $\dd t_{\max}$ & $5\times10^{-2}$ \\
+  Initial velocity mixing & $\alpha_{\mathrm{start}}$ & $0.1$ \\
+  Mixing decay & $f_\alpha$ & $0.99$ \\
+  $\dd t$ increase factor & $f_{\mathrm{inc}}$ & $1.1$ \\
+  $\dd t$ decrease factor & $f_{\mathrm{dec}}$ & $0.5$ \\
+  Min steps before increase & $n_{\min}$ & $5$ \\
+\end{tabular}
+\end{center}
+
+\subsection{Time-step scaling for dense packings}
+
+For a system with maximum force $F_{\max}$ and minimum edge length $L_{\min}$,
+a safe time step is determined by requiring that the maximum displacement per step
+at $\dd t_{\max}$ remains small compared to $L_{\min}$:
+\[
+  v_{\max}\,\dd t_{\max} \lesssim \eps\,L_{\min},
+  \qquad v_{\max} \sim F_{\max}\,\dd t_{\max}.
+\]
+This gives
+\[
+  \dd t_{\max} \lesssim \sqrt{\eps L_{\min} / F_{\max}}.
+\]
+For $\eps = 10^{-3}$, $L_{\min} \approx \mathrm{EL}_{\mathrm{small}}$, and
+$F_{\max}$ from the initial configuration.
+
+%% ============================================================
+\section{Shape Generation via SLSQP}
+%% ============================================================
+
+\subsection{Goal}
+
+Generate a random equilateral closed polygon with $N$ sides, shape index $\kappa$,
+and backbone area $A_{\mathrm{tgt}}$, by optimizing a random distribution of interior
+angles subject to closure, equilateral, and area constraints.
+
+\subsection{Angle parameterisation}
+
+Parameterise the polygon by its $N-1$ free interior turning angles
+$\boldsymbol{\phi} = (\phi_0, \ldots, \phi_{N-2}) \in (0, \pi)^{N-1}$ (the $N$-th angle
+is fixed by the closure condition $\sum_k \phi_k = 2\pi$ minus the last).
+
+Given $\boldsymbol{\phi}$, construct the vertices:
+\[
+  \theta_k = \sum_{j=0}^{k-1} \phi_j, \quad
+  \hat{\mathbf{e}}_k = (\cos\theta_k, \sin\theta_k), \quad
+  \mathbf{v}_0 = \mathbf{0}, \quad
+  \mathbf{v}_{k+1} = \mathbf{v}_k + \hat{\mathbf{e}}_k.
+\]
+(Unit edge lengths; all $L_k = 1$.)
+
+\subsection{Closure constraint}
+
+For the polygon to close: $\mathbf{v}_N = \mathbf{v}_0 = \mathbf{0}$, i.e.:
+\[
+  \sum_{k=0}^{N-1} \hat{\mathbf{e}}_k = \mathbf{0}.
+\]
+This gives 2 equality constraints on $\boldsymbol{\phi}$.
+
+\subsection{Shape index constraint}
+
+The polygon has all edges of unit length, so perimeter $P = N$.  The area is
+$A = A(\boldsymbol{\phi})$.  The shape index is $\kappa = P/\sqrt{A} = N/\sqrt{A}$.
+Requiring $\kappa = \kappa_0$ is equivalent to requiring
+\[
+  A(\boldsymbol{\phi}) = (N/\kappa_0)^2 =: A_{\mathrm{unit}}.
+\]
+This is 1 additional equality constraint.
+
+\subsection{SLSQP formulation}
+
+\begin{align*}
+  \min_{\boldsymbol{\phi}} \quad & \tfrac{1}{2}|\boldsymbol{\phi} - \boldsymbol{\phi}_0|^2
+    \quad\text{(stay close to random reference)} \\
+  \text{s.t.} \quad
+  & \sum_k \cos\theta_k(\boldsymbol{\phi}) = 0, \\
+  & \sum_k \sin\theta_k(\boldsymbol{\phi}) = 0, \\
+  & A(\boldsymbol{\phi}) = A_{\mathrm{unit}}, \\
+  & \pi > \sum_k \phi_k > \pi, \quad \phi_k \in (10^{-4}, \pi - 10^{-4}).
+\end{align*}
+(The range constraint on $\sum \phi_k$ is a convenience to avoid self-intersections
+and ensure a convex-ish polygon; the bounds on $\phi_k$ prevent degenerate angles.)
+
+The reference $\boldsymbol{\phi}_0$ is drawn from a Dirichlet distribution scaled to
+$[0, 2\pi]$, giving random convex-ish shapes.  If SLSQP succeeds, the resulting
+unit-area polygon is scaled to area $A_{\mathrm{tgt}}$:
+\[
+  \mathbf{v}_k \leftarrow \sqrt{A_{\mathrm{tgt}}/A_{\mathrm{unit}}}\,(\mathbf{v}_k - \bar{\mathbf{v}}),
+\]
+where $\bar{\mathbf{v}}$ is the centre of mass.  A random rotation is applied to
+break any orientation bias.
+
+%% ============================================================
+\section{Bidisperse Packing Setup}
+%% ============================================================
+
+\subsection{Target areas}
+
+The packing has $N_L = N_S = N_{\mathrm{poly}}/2$ large and small polygons in a unit
+$[0,1)^2$ box.  The \emph{backbone packing fraction} is:
+\[
+  \phi = N_L A_L + N_S A_S.
+\]
+The large and small polygons have the same shape index $\kappa$ but the large polygon's
+perimeter is $\mathrm{ratio}$ times larger than the small polygon's:
+\[
+  P_L = \mathrm{ratio}\cdot P_S \implies A_L = \mathrm{ratio}^2 \cdot A_S.
+\]
+Substituting into the packing fraction:
+\[
+  \phi = N_L \mathrm{ratio}^2 A_S + N_S A_S = A_S(N_L\,\mathrm{ratio}^2 + N_S),
+\]
+\[
+  \boxed{A_S = \frac{\phi}{N_L\,\mathrm{ratio}^2 + N_S}, \qquad A_L = \mathrm{ratio}^2\,A_S.}
+\]
+
+\subsection{Target edge lengths}
+
+For a polygon with shape index $\kappa$, backbone area $A$, and $N$ equilateral edges
+of length $L$:
+\[
+  P = N L = \kappa\sqrt{A} \implies L = \frac{\kappa\sqrt{A}}{N}.
+\]
+SHAKE uses these target edge lengths to maintain equilateral polygons.
+
+\subsection{Rounding radius}
+
+The rounding radius $\delta$ is chosen relative to the \emph{smaller} polygon's edge length:
+\[
+  \delta = 0.15\,L_S = \frac{0.15\,\kappa\sqrt{A_S}}{N}.
+\]
+This ensures the validity condition $\delta < L/(2\tan(\pi/N)) \approx L\cdot N/(2\pi)$
+(for large $N$, $\tan(\pi/N) \approx \pi/N$) is comfortably satisfied for both polygon sizes.
+
+\subsection{Packing fraction for the 2-polygon test}
+
+For the two-polygon test we use a reference large polygon area of $A_L = 0.8/64$ (same
+as the per-polygon area in a 64-polygon packing at $\phi = 0.8$).  The small polygon
+is obtained by $A_S = A_L / \mathrm{ratio}^2$.  In this case:
+\[
+  A_L = \frac{0.8}{64} = 0.01250, \qquad A_S = \frac{0.01250}{1.96} \approx 0.006378.
+\]
+
+%% ============================================================
+\section{Periodic Boundary Conditions}
+%% ============================================================
+
+All positions live in $[0,1)^2$.  The minimum-image convention is:
+\[
+  \mathrm{wrap}(x) = x - \lfloor x + \tfrac{1}{2}\rfloor.
+\]
+When computing edge vectors $\mathbf{u} = \mathbf{a}_k - \mathbf{a}_{k-1}$,
+the wrap function is applied component-wise to $a_{k,x} - a_{k-1,x}$ and
+$a_{k,y} - a_{k-1,y}$.
+
+For computing the interaction between polygon $A$ (where vertex $i$ lives)
+and polygon $B$, all of $B$'s vertices are placed in the same image as $B$'s
+first vertex, which is placed at the minimum-image position relative to vertex $i$:
+\[
+  \mathbf{b}_0^{\mathrm{MIC}} = \mathbf{a}_i + \mathrm{wrap}(\mathbf{b}_0 - \mathbf{a}_i),
+  \qquad \mathbf{b}_j^{\mathrm{MIC}} = \mathbf{b}_0^{\mathrm{MIC}} + (\mathbf{b}_j - \mathbf{b}_0).
+\]
+This ensures the entire polygon $B$ is in a single consistent periodic image, preventing
+artefacts from vertices on opposite sides of the wrap boundary.
+
+%% ============================================================
+\section{Summary of Computational Flow}
+%% ============================================================
+
+\begin{enumerate}
+  \item \textbf{Initialization}:
+    Generate $N_{\mathrm{poly}}$ random equilateral polygons with target areas and
+    shape index via SLSQP.  Place on jittered grid.  Initialize neighbour cells.
+
+  \item \textbf{Force/energy evaluation} (\texttt{updateForceEnergyRoundedCUDA}):
+    For each vertex $i$ of polygon $A$, in parallel:
+    \begin{enumerate}
+      \item Compute arc geometry at $i$ and $\mathrm{next}[i]$.
+      \item Find all polygons $B \neq A$ in the 3×3 neighbourhood of $i$'s cell.
+      \item For arc $K_i$: find crossings with all edges/arcs of $\tilde B$;
+            integrate signed area over inside sub-intervals.
+      \item For edge $E_i$: similarly.
+      \item Accumulate forces on $\{i\!-\!1, i, i\!+\!1, i\!+\!2\}$ via
+            chain rule through arc geometry; also update forces on $B$'s vertices.
+    \end{enumerate}
+
+  \item \textbf{Force projection} (\texttt{projectForceCUDA}):
+    SVD of edge-gradient matrix + Gram–Schmidt area projection.
+
+  \item \textbf{FIRE step}:
+    Half-velocity update $\to$ position update $\to$ SHAKE $\to$ velocity rederivation
+    $\to$ force evaluation $\to$ second half-velocity $\to$ FIRE steering.
+
+  \item Repeat until $|\mathbf{F}_\perp|_\infty < F_{\mathrm{tol}}$ or maximum steps.
+\end{enumerate}
+
+\end{document}

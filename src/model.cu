@@ -139,15 +139,11 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
 
     CUDA_CHECK(cub::DeviceSegmentedReduce::Sum(d_temp_storage, temp_storage_bytes, comParts + numVertices, comY, numPolygons, startIndices, startIndices + 1));
 
-    // max edge length reduce
-    size_t temp_bytes_max = 0;
-    CUDA_CHECK(cub::DeviceReduce::Max(nullptr, temp_bytes_max, edgeLengths, maxEdgeLength, numVertices));
-    if (temp_bytes_max > temp_storage_bytes) {
-        CUDA_CHECK(cudaFree(d_temp_storage));
-        CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_bytes_max));
-        temp_storage_bytes = temp_bytes_max;
-    }
-    CUDA_CHECK(cub::DeviceReduce::Max(d_temp_storage, temp_bytes_max, edgeLengths, maxEdgeLength, numVertices));
+    // maxEdgeLength is NOT recomputed here. Under SHAKE the constraint manifold
+    // pins edge lengths, so the user-set value (from setMaxEdgeLength) is the
+    // physical max for the entire simulation. Recomputing live would silently
+    // shrink the Verlet ball radius after polygons relax and start missing
+    // overlap pairs.
 
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -390,9 +386,9 @@ extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int
     CUDA_CHECK_KERNEL();
 }
 
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox, int* maxActualNeighbors, double2* tu, bool* inside) {
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox, int* maxActualNeighbors, double2* tu, bool* inside, double delta) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, tu, inside);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, tu, inside, delta);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -550,6 +546,581 @@ extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersecti
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+extern "C" void updateForceEnergyVertexDiskCUDA(int numVertices, const double* positions, const int* shapeId, const int* next, const int* cellLocation, const int* neighborIndices, const int* countPerBox, int boxSize, double delta, double* force, double* energy) {
+    if (delta <= 0.0) return;
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    updateForceEnergyVertexDiskKernel<<<blocks, threads>>>(numVertices, positions, shapeId, next, cellLocation, neighborIndices, countPerBox, boxSize, delta, force, energy);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" void updateForceEnergyVertexDiskBallCUDA(int numVertices, const double* positions, const int* shapeId, const int* next, const int* ballNeighbors, const int* numBallNeighbors, int ballMaxNeighbors, double delta, double* force, double* energy) {
+    if (delta <= 0.0) return;
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    updateForceEnergyVertexDiskBallKernel<<<blocks, threads>>>(numVertices, positions, shapeId, next, ballNeighbors, numBallNeighbors, ballMaxNeighbors, delta, force, energy);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" int buildBallListCUDA(int numVertices, const double* positions, const int* shapeId, double ballRadius, int ballMaxNeighbors, int* ballNeighbors, int* numBallNeighbors, int* maxActualBallNeighbors) {
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    double ballRadius2 = ballRadius * ballRadius;
+    buildBallListKernel<<<blocks, threads>>>(positions, shapeId, numVertices, ballRadius2, ballMaxNeighbors, ballNeighbors, numBallNeighbors);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    int initVal = INT_MIN;
+    CUDA_CHECK(cudaMemcpy(maxActualBallNeighbors, &initVal, sizeof(int), cudaMemcpyHostToDevice));
+    int reduceThreads = 256;
+    int reduceBlocks = (numVertices + reduceThreads - 1) / reduceThreads;
+    maxReduceKernel<<<reduceBlocks, reduceThreads, reduceThreads * sizeof(int)>>>(numBallNeighbors, numVertices, maxActualBallNeighbors);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int newMaxActual;
+    CUDA_CHECK(cudaMemcpy(&newMaxActual, maxActualBallNeighbors, sizeof(int), cudaMemcpyDeviceToHost));
+    return newMaxActual;
+}
+
+// Feature-pair refactor (Phase A): launch the candidate emitter.
+//
+// outPairs   : device buffer of feat::FeaturePair, length >= outCapacity
+// outCount   : single device int, used as an atomic counter (reset to 0 here)
+// outCapacity: size of outPairs in entries
+// featureSetSize: 1 (normal), 2 (single-arc rounded), 3 (biarc)
+//
+// Returns the host-visible count of pairs emitted. If > outCapacity, caller
+// should resize and re-run.
+extern "C" int emitFeaturePairsCUDA(
+    int numVertices,
+    const int* shapeId,
+    const int* ballNeighbors,
+    const int* numBallNeighbors,
+    int ballMaxNeighbors,
+    int featureSetSize,
+    unsigned int* outPairsRaw,    // 2 * outCapacity uints, treated as feat::FeaturePair*
+    int* outCount,
+    int outCapacity)
+{
+    feat::FeaturePair* outPairs = reinterpret_cast<feat::FeaturePair*>(outPairsRaw);
+    CUDA_CHECK(cudaMemset(outCount, 0, sizeof(int)));
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    emitFeaturePairsKernel<<<blocks, threads>>>(
+        numVertices, shapeId, ballNeighbors, numBallNeighbors, ballMaxNeighbors,
+        featureSetSize, outPairs, outCount, outCapacity);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, outCount, sizeof(int), cudaMemcpyDeviceToHost));
+    return count;
+}
+
+// Phase B launcher: per-pair crossing detection (edge-edge only in this
+// installment). pairsRaw is reinterpreted as feat::FeaturePair*, and
+// outCrossingsRaw as feat::Crossing* (each crossing is sizeof(feat::Crossing)
+// bytes -- the host gets that via crossingByteSize() below).
+extern "C" int detectCrossingsCUDA(
+    int numPairs,
+    const unsigned int* pairsRaw,
+    const double* positions,
+    const int* next,
+    const int* prev,
+    const int* shapeId,
+    const double* polyDelta,
+    void* outCrossingsRaw,
+    int* outCount,
+    int outCapacity)
+{
+    const feat::FeaturePair* pairs = reinterpret_cast<const feat::FeaturePair*>(pairsRaw);
+    feat::Crossing* outCrossings   = reinterpret_cast<feat::Crossing*>(outCrossingsRaw);
+
+    CUDA_CHECK(cudaMemset(outCount, 0, sizeof(int)));
+    if (numPairs <= 0) return 0;
+    int threads = blockSize;
+    int blocks  = (numPairs + threads - 1) / threads;
+    detectCrossingsKernel<<<blocks, threads>>>(
+        numPairs, pairs, positions, next, prev, shapeId, polyDelta,
+        outCrossings, outCount, outCapacity);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int count;
+    CUDA_CHECK(cudaMemcpy(&count, outCount, sizeof(int), cudaMemcpyDeviceToHost));
+    return count;
+}
+
+// Phase C scaffolding: sort the crossing buffer in place by (fA, paramA) and
+// run-length-encode the sorted fA stream so the host (and per-feature walk
+// kernels) can find each A-feature's contiguous slice in O(1).
+//
+// Memory contract:
+//   - crossingsInOut : crossing array of length numCrossings (modified in place)
+//   - crossingsTMP   : scratch of the same length (caller-owned)
+//   - keys / idx     : numCrossings uint64 / uint32 scratch
+//   - uniqueFAOut / lengthsOut : at least numCrossings uint32 each (RLE output)
+//   - numUniqueOut   : single int (RLE output count)
+// Returns numUniqueFA (number of distinct A-features with at least one crossing).
+extern "C" int sortAndRleCrossingsCUDA(
+    int numCrossings,
+    void* crossingsInOut,
+    void* crossingsTMP,
+    uint64_t* keys,
+    uint32_t* idx,
+    uint32_t* uniqueFAOut,
+    uint32_t* lengthsOut,
+    int* numUniqueOut)
+{
+    if (numCrossings <= 0) {
+        CUDA_CHECK(cudaMemset(numUniqueOut, 0, sizeof(int)));
+        return 0;
+    }
+    feat::Crossing* crossings    = reinterpret_cast<feat::Crossing*>(crossingsInOut);
+    feat::Crossing* crossingsTmp = reinterpret_cast<feat::Crossing*>(crossingsTMP);
+
+    int threads = blockSize;
+    int blocks  = (numCrossings + threads - 1) / threads;
+
+    // 1) build (key, identity-perm).
+    buildCrossingKeysKernel<<<blocks, threads>>>(numCrossings, crossings, keys, idx);
+    CUDA_CHECK_KERNEL();
+
+    // 2) sort idx by key. Need a scratch keys-out buffer; reuse end of TMP via
+    // a small extra alloc (numCrossings * uint64 = ~tens of MB worst case; OK
+    // for now -- could pool later).
+    uint64_t* keysOut = nullptr;
+    uint32_t* idxOut  = nullptr;
+    CUDA_CHECK(cudaMalloc(&keysOut, (size_t)numCrossings * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&idxOut,  (size_t)numCrossings * sizeof(uint32_t)));
+
+    void*  d_temp = nullptr;
+    size_t d_temp_bytes = 0;
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        d_temp, d_temp_bytes, keys, keysOut, idx, idxOut, numCrossings));
+    CUDA_CHECK(cudaMalloc(&d_temp, d_temp_bytes));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        d_temp, d_temp_bytes, keys, keysOut, idx, idxOut, numCrossings));
+    CUDA_CHECK(cudaFree(d_temp));
+
+    // 3) gather crossings -> tmp, then memcpy back to in-place buffer.
+    gatherCrossingsKernel<<<blocks, threads>>>(numCrossings, crossings, idxOut, crossingsTmp);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaMemcpy(crossings, crossingsTmp,
+                          (size_t)numCrossings * sizeof(feat::Crossing),
+                          cudaMemcpyDeviceToDevice));
+
+    CUDA_CHECK(cudaFree(keysOut));
+    CUDA_CHECK(cudaFree(idxOut));
+
+    // 4) extract fA into a flat uint32 stream, then RLE-encode.
+    // Reuse idx scratch for the fA stream (same size, same type).
+    extractFAKernel<<<blocks, threads>>>(numCrossings, crossings, idx);
+    CUDA_CHECK_KERNEL();
+
+    void*  d_temp2 = nullptr;
+    size_t d_temp2_bytes = 0;
+    CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
+        d_temp2, d_temp2_bytes, idx, uniqueFAOut, lengthsOut, numUniqueOut, numCrossings));
+    CUDA_CHECK(cudaMalloc(&d_temp2, d_temp2_bytes));
+    CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(
+        d_temp2, d_temp2_bytes, idx, uniqueFAOut, lengthsOut, numUniqueOut, numCrossings));
+    CUDA_CHECK(cudaFree(d_temp2));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int nUnique = 0;
+    CUDA_CHECK(cudaMemcpy(&nUnique, numUniqueOut, sizeof(int), cudaMemcpyDeviceToHost));
+    return nUnique;
+}
+
+// Per-A-polygon walk: sorts crossings by (sA, boundary-order param), runs
+// RLE on the sA stream, then dispatches one thread per polygon to walk all
+// of A's crossings in boundary order with global per-partner parity tracking.
+// This fixes the cross-feature chord-pair bug in phaseCWalkAreaPerFeatureCUDA.
+//
+// Input: crossingsInOut is the unsorted crossing buffer from Phase B
+//        (this routine sorts in-place using crossingsTMP scratch).
+// Output: areaOut[s] = chord-area sum for polygon s (signed). Caller sums
+//         across polygons and divides by 2 to get the total overlap area
+//         (each pair contributes from both sides of the walk).
+//
+// Returns numUniqueShapes (the number of polygons that participated).
+extern "C" int phaseCWalkAreaPerPolygonCUDA(
+    int numCrossings,
+    void* crossingsInOut,
+    void* crossingsTMP,
+    uint64_t* keys,
+    uint32_t* idx,
+    uint32_t* uniqueShape_d,
+    uint32_t* lengths_d,
+    uint32_t* sliceStart_d,
+    int* numUniqueOut_d,
+    const int* shapeId,
+    const int* startIndices,
+    const double* positions,
+    const double* polyDelta,
+    double* areaOut)
+{
+    if (numCrossings <= 0) {
+        CUDA_CHECK(cudaMemset(numUniqueOut_d, 0, sizeof(int)));
+        return 0;
+    }
+    // PHASEC_MAX_PARTNERS = 256, ~4.3 KB per thread of stack; lift limit once.
+    static bool stack_lifted = false;
+    if (!stack_lifted) {
+        CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 16 * 1024));
+        stack_lifted = true;
+    }
+    feat::Crossing* crossings    = reinterpret_cast<feat::Crossing*>(crossingsInOut);
+    feat::Crossing* crossingsTmp = reinterpret_cast<feat::Crossing*>(crossingsTMP);
+
+    int threads = blockSize;
+
+    // 0) Duplicate crossings with swapped (fA, fB) so each polygon-pair (A, B)
+    // contributes one record to A's slice AND one to B's slice. Phase A only
+    // emits pairs in the sA < sB direction, so without this only the lower-id
+    // polygon would have crossings; the partner's path integral would be
+    // missing, breaking the anchor-term cancellation in Green's theorem.
+    int blocks_orig = (numCrossings + threads - 1) / threads;
+    duplicateCrossingsKernel<<<blocks_orig, threads>>>(numCrossings, crossings, crossingsTmp);
+    CUDA_CHECK_KERNEL();
+    int totalCrossings = 2 * numCrossings;
+    CUDA_CHECK(cudaMemcpy(crossings, crossingsTmp,
+                          (size_t)totalCrossings * sizeof(feat::Crossing),
+                          cudaMemcpyDeviceToDevice));
+    int blocks = (totalCrossings + threads - 1) / threads;
+
+    // 1) Build per-polygon keys (sA << 32) | float_bits(boundary-order param).
+    buildPolygonKeysKernel<<<blocks, threads>>>(totalCrossings, crossings,
+                                                  shapeId, startIndices, keys, idx);
+    CUDA_CHECK_KERNEL();
+
+    // 2) Sort keys -> idx permutation.
+    uint64_t* keysOut = nullptr;
+    uint32_t* idxOut  = nullptr;
+    CUDA_CHECK(cudaMalloc(&keysOut, (size_t)totalCrossings * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&idxOut,  (size_t)totalCrossings * sizeof(uint32_t)));
+    void* d_temp = nullptr; size_t d_temp_bytes = 0;
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(d_temp, d_temp_bytes,
+                                                 keys, keysOut, idx, idxOut, totalCrossings));
+    CUDA_CHECK(cudaMalloc(&d_temp, d_temp_bytes));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(d_temp, d_temp_bytes,
+                                                 keys, keysOut, idx, idxOut, totalCrossings));
+    CUDA_CHECK(cudaFree(d_temp));
+
+    // 3) Gather crossings by permutation into TMP, then copy back in place.
+    gatherCrossingsKernel<<<blocks, threads>>>(totalCrossings, crossings, idxOut, crossingsTmp);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaMemcpy(crossings, crossingsTmp,
+                          (size_t)totalCrossings * sizeof(feat::Crossing),
+                          cudaMemcpyDeviceToDevice));
+
+    CUDA_CHECK(cudaFree(keysOut));
+    CUDA_CHECK(cudaFree(idxOut));
+
+    // 4) Extract sA stream for RLE.
+    uint32_t* shapeStream = nullptr;
+    CUDA_CHECK(cudaMalloc(&shapeStream, (size_t)totalCrossings * sizeof(uint32_t)));
+    extractShapeIdKernel<<<blocks, threads>>>(totalCrossings, crossings, shapeId, shapeStream);
+    CUDA_CHECK_KERNEL();
+
+    // 5) RLE: produces (uniqueShape_d, lengths_d, numUnique).
+    void* d_temp2 = nullptr; size_t d_temp2_bytes = 0;
+    CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(d_temp2, d_temp2_bytes,
+                                                    shapeStream, uniqueShape_d,
+                                                    lengths_d, numUniqueOut_d,
+                                                    totalCrossings));
+    CUDA_CHECK(cudaMalloc(&d_temp2, d_temp2_bytes));
+    CUDA_CHECK(cub::DeviceRunLengthEncode::Encode(d_temp2, d_temp2_bytes,
+                                                    shapeStream, uniqueShape_d,
+                                                    lengths_d, numUniqueOut_d,
+                                                    totalCrossings));
+    CUDA_CHECK(cudaFree(d_temp2));
+    CUDA_CHECK(cudaFree(shapeStream));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int numUnique = 0;
+    CUDA_CHECK(cudaMemcpy(&numUnique, numUniqueOut_d, sizeof(int), cudaMemcpyDeviceToHost));
+    if (numUnique <= 0) return 0;
+
+    // 6) Prefix-sum lengths into sliceStart.
+    exclusiveScanU32Kernel<<<1, 1>>>(lengths_d, sliceStart_d, numUnique);
+    CUDA_CHECK_KERNEL();
+
+    // 7) Per-polygon walk.
+    int threads2 = blockSize;
+    int blocks2  = (numUnique + threads2 - 1) / threads2;
+    phaseCWalkAreaPerPolygonKernel<<<blocks2, threads2>>>(
+        numUnique, uniqueShape_d, lengths_d, sliceStart_d,
+        crossings, shapeId, startIndices, positions, polyDelta, areaOut);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return numUnique;
+}
+
+// Phase C installment 2 launcher: per-feature area walk. Given the sorted
+// crossings and RLE output from installment 1, compute the per-A-feature
+// inside chord-area sum. Caller passes scratch (sliceStart of length
+// numUniqueFA uint32) and output buffer (areaOut of length numUniqueFA
+// double).
+extern "C" void phaseCWalkAreaPerFeatureCUDA(
+    int numUniqueFA,
+    const uint32_t* uniqueFA,
+    const uint32_t* lengths,
+    uint32_t*       sliceStart,
+    const void*     crossingsRaw,
+    const int*      shapeId,
+    const int*      startIndices,
+    const double*   positions,
+    double*         areaOut)
+{
+    if (numUniqueFA <= 0) return;
+    const feat::Crossing* crossings = reinterpret_cast<const feat::Crossing*>(crossingsRaw);
+
+    // Build exclusive-scan of lengths -> sliceStart (single-thread; tiny).
+    exclusiveScanU32Kernel<<<1, 1>>>(lengths, sliceStart, numUniqueFA);
+    CUDA_CHECK_KERNEL();
+
+    int threads = blockSize;
+    int blocks  = (numUniqueFA + threads - 1) / threads;
+    phaseCWalkAreaPerFeatureKernel<<<blocks, threads>>>(
+        numUniqueFA, uniqueFA, lengths, sliceStart,
+        crossings, shapeId, startIndices, positions, areaOut);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// Phase C installment 4 launcher: per-feature area + edge-edge force walk
+// with dual-traced tangent-point Jacobian (delta>0 supported).
+extern "C" void phaseCWalkAreaForceDualPerFeatureCUDA(
+    int numUniqueFA,
+    int numVertices,
+    const uint32_t* uniqueFA,
+    const uint32_t* lengths,
+    uint32_t*       sliceStart,
+    const void*     crossingsRaw,
+    const int*      shapeId,
+    const int*      startIndices,
+    const int*      next_arr,
+    const int*      prev_arr,
+    const double*   positions,
+    double          delta,
+    double*         areaOut,
+    double*         forceOut)
+{
+    if (numUniqueFA <= 0) return;
+    const feat::Crossing* crossings = reinterpret_cast<const feat::Crossing*>(crossingsRaw);
+
+    // Dual<16> + ~25 intermediates ~ 5-6 KB per thread; default 1 KB stack
+    // overflows and silently corrupts adjacent threads' state. Lift the
+    // stack limit once.
+    static bool stack_lifted = false;
+    if (!stack_lifted) {
+        CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 16 * 1024));
+        stack_lifted = true;
+    }
+
+    exclusiveScanU32Kernel<<<1, 1>>>(lengths, sliceStart, numUniqueFA);
+    CUDA_CHECK_KERNEL();
+
+    CUDA_CHECK(cudaMemset(forceOut, 0, (size_t)numVertices * 2 * sizeof(double)));
+
+    int threads = blockSize;
+    int blocks  = (numUniqueFA + threads - 1) / threads;
+    phaseCWalkAreaForceDualPerFeatureKernel<<<blocks, threads>>>(
+        numUniqueFA, uniqueFA, lengths, sliceStart,
+        crossings, shapeId, startIndices, next_arr, prev_arr, positions, delta,
+        areaOut, forceOut);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// Phase C installment 3 launcher: per-feature area walk + edge-edge force
+// accumulation. forceOut must be pre-zeroed of length 2*numVertices doubles.
+extern "C" void phaseCWalkAreaForcePerFeatureCUDA(
+    int numUniqueFA,
+    int numVertices,
+    const uint32_t* uniqueFA,
+    const uint32_t* lengths,
+    uint32_t*       sliceStart,
+    const void*     crossingsRaw,
+    const int*      shapeId,
+    const int*      startIndices,
+    const int*      next_arr,
+    const int*      prev_arr,
+    const double*   polyDelta,
+    const double*   positions,
+    double*         areaOut,
+    double*         forceOut)
+{
+    if (numUniqueFA <= 0) return;
+    const feat::Crossing* crossings = reinterpret_cast<const feat::Crossing*>(crossingsRaw);
+
+    // Build exclusive-scan of lengths -> sliceStart.
+    exclusiveScanU32Kernel<<<1, 1>>>(lengths, sliceStart, numUniqueFA);
+    CUDA_CHECK_KERNEL();
+
+    // Zero forceOut.
+    CUDA_CHECK(cudaMemset(forceOut, 0, (size_t)numVertices * 2 * sizeof(double)));
+
+    int threads = blockSize;
+    int blocks  = (numUniqueFA + threads - 1) / threads;
+    phaseCWalkAreaForcePerFeatureKernel<<<blocks, threads>>>(
+        numUniqueFA, uniqueFA, lengths, sliceStart,
+        crossings, shapeId, startIndices, prev_arr, polyDelta,
+        next_arr, positions, areaOut, forceOut);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// Lets the host query sizeof(feat::Crossing) without including features.cuh
+// in pure-C++ TUs.
+extern "C" int crossingByteSize() {
+    return (int)sizeof(feat::Crossing);
+}
+
+// Per-polygon uniform-delta mode: one-time target initialization and per-step
+// update. See the kernel comments in kernels.cuh for the math.
+extern "C" void fillScalarCUDA(double* data, int n, double value) {
+    int threads = blockSize;
+    int blocks  = (n + threads - 1) / threads;
+    fillScalarKernel<<<blocks, threads>>>(data, n, value);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" void initPolyDeltaTargetsCUDA(int numPolygons,
+                                          const double* positions,
+                                          const int* startIndices,
+                                          double deltaInitial,
+                                          double* polyDeltaTargets) {
+    int threads = blockSize;
+    int blocks  = (numPolygons + threads - 1) / threads;
+    initPolyDeltaTargetsKernel<<<blocks, threads>>>(numPolygons, positions, startIndices,
+                                                     deltaInitial, polyDeltaTargets);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" void updatePolyDeltaCUDA(int numPolygons,
+                                     const double* positions,
+                                     const int* startIndices,
+                                     const double* polyDeltaTargets,
+                                     double* polyDelta) {
+    int threads = blockSize;
+    int blocks  = (numPolygons + threads - 1) / threads;
+    updatePolyDeltaKernel<<<blocks, threads>>>(numPolygons, positions, startIndices,
+                                                polyDeltaTargets, polyDelta);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" double maxDisplacementCUDA(int numVertices, const double* positions, const double* refPositions, double* dispSq) {
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    ballMaxDisplacementSqKernel<<<blocks, threads>>>(positions, refPositions, numVertices, dispSq);
+    CUDA_CHECK_KERNEL();
+
+    double* dResult;
+    CUDA_CHECK(cudaMalloc(&dResult, sizeof(double)));
+    void* dTemp = nullptr;
+    size_t tempBytes = 0;
+    CUDA_CHECK(cub::DeviceReduce::Max(dTemp, tempBytes, dispSq, dResult, numVertices));
+    CUDA_CHECK(cudaMalloc(&dTemp, tempBytes));
+    CUDA_CHECK(cub::DeviceReduce::Max(dTemp, tempBytes, dispSq, dResult, numVertices));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    double maxSq;
+    CUDA_CHECK(cudaMemcpy(&maxSq, dResult, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(dTemp));
+    CUDA_CHECK(cudaFree(dResult));
+    return sqrt(maxSq);
+}
+
+extern "C" void updateForceEnergyRoundedCUDA(
+    int numVertices,
+    const double* positions, const int* shapeId,
+    const int* next, const int* prev, const int* startIndices,
+    const int* ballNeighbors, const int* numBallNeighbors, int ballMaxNeighbors,
+    double delta, int polygonSize,
+    double* scratch, double* force, double* energy)
+{
+    if (delta <= 0.0) return;
+    // Cap at 32 (size of the per-thread processedShapes[] stack array in the kernel).
+    // Was previously polygonSize, but order of candidate encounter then determined
+    // which neighbor shapes get processed when numPolygons > maxProc; we want the
+    // result to be order-independent so cells and balls candidate paths agree.
+    int maxProc = 32;
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    updateForceEnergyRoundedKernel<<<blocks, threads>>>(
+        numVertices, positions, shapeId, next, prev, startIndices,
+        ballNeighbors, numBallNeighbors, ballMaxNeighbors,
+        delta, polygonSize, maxProc, scratch, force, energy,
+        nullptr, nullptr, 0);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" int populateCandidatesFromCellsCUDA(int numVertices, const int* shapeId,
+    const int* cellLocation, const int* neighborIndices, const int* countPerBox,
+    int boxSize, int ballMaxNeighbors,
+    int* ballNeighbors, int* numBallNeighbors, int* maxActualBallNeighbors)
+{
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+    populateCandidatesFromCellsKernel<<<blocks, threads>>>(
+        shapeId, cellLocation, neighborIndices, countPerBox,
+        boxSize, numVertices, ballMaxNeighbors,
+        ballNeighbors, numBallNeighbors);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    int initVal = INT_MIN;
+    CUDA_CHECK(cudaMemcpy(maxActualBallNeighbors, &initVal, sizeof(int), cudaMemcpyHostToDevice));
+    int reduceThreads = 256;
+    int reduceBlocks = (numVertices + reduceThreads - 1) / reduceThreads;
+    maxReduceKernel<<<reduceBlocks, reduceThreads, reduceThreads * sizeof(int)>>>(numBallNeighbors, numVertices, maxActualBallNeighbors);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    int newMaxActual;
+    CUDA_CHECK(cudaMemcpy(&newMaxActual, maxActualBallNeighbors, sizeof(int), cudaMemcpyDeviceToHost));
+    return newMaxActual;
+}
+
+extern "C" void updateForceEnergyAreaSquaredCUDA(
+    int numVertices, int numPolygons,
+    const double* positions, const int* shapeId,
+    const int* next, const int* prev, const int* startIndices,
+    const int* ballNeighbors, const int* numBallNeighbors, int ballMaxNeighbors,
+    double delta, int polygonSize,
+    double* scratch, double* force, double* energy,
+    double* pairArea)
+{
+    if (delta <= 0.0) return;
+    int maxProc = 32;
+    int threads = blockSize;
+    int blocks  = (numVertices + threads - 1) / threads;
+
+    // Pass 1: accumulate per-(sA,sB) areas into pairArea
+    CUDA_CHECK(cudaMemset(pairArea, 0, (long long)numPolygons * numPolygons * sizeof(double)));
+    updateForceEnergyRoundedKernel<<<blocks, threads>>>(
+        numVertices, positions, shapeId, next, prev, startIndices,
+        ballNeighbors, numBallNeighbors, ballMaxNeighbors,
+        delta, polygonSize, maxProc, scratch, force, energy,
+        pairArea, nullptr, numPolygons);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Pass 2: compute forces and energy scaled by area
+    updateForceEnergyRoundedKernel<<<blocks, threads>>>(
+        numVertices, positions, shapeId, next, prev, startIndices,
+        ballNeighbors, numBallNeighbors, ballMaxNeighbors,
+        delta, polygonSize, maxProc, scratch, force, energy,
+        nullptr, pairArea, numPolygons);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
@@ -607,6 +1178,27 @@ extern "C" void rederiveVelocityFromDisplacementFIRECUDA(int numVertices, double
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// Per-vertex force magnitude clamp (preserves direction)
+__global__ void clampForceMagKernel(int n, double* force, double maxMag) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    double fx = force[2*i], fy = force[2*i+1];
+    double mag2 = fx*fx + fy*fy;
+    if (mag2 > maxMag * maxMag) {
+        double scale = maxMag / sqrt(mag2);
+        force[2*i]   = fx * scale;
+        force[2*i+1] = fy * scale;
+    }
+}
+
+extern "C" void clampForceMagCUDA(int numVertices, double* force, double maxMag) {
+    int block = 256;
+    int grid  = (numVertices + block - 1) / block;
+    clampForceMagKernel<<<grid, block>>>(numVertices, force, maxMag);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 // getters
 
 extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force) {
@@ -640,6 +1232,14 @@ extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double
     int threads = 256;
     int grid = (numVertices * 2 + threads - 1) / threads;
     resetAreasKernel<<<grid, threads>>>(numVertices, shapeId, positions, areas, targetAreas, comX, comY);
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+extern "C" void negateArrayCUDA(double* arr, int n) {
+    int threads = blockSize;
+    int grid = (n + threads - 1) / threads;
+    negateArrayKernel<<<grid, threads>>>(arr, n);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
