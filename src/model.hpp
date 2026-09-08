@@ -89,8 +89,6 @@ public:
 
     void updatePolygonGeometry();
     void projectForce();
-    int  shakeProject(int nIter, double tol = 1e-15);
-    int  getLastShakeIters() const;
     void saveTentativePositions();
     double getMaxEffectiveForce(double dt, minimizerEnum minimizerType) const;
     void updateNeighborCells();
@@ -103,8 +101,8 @@ public:
     void updateForceEnergy();
     void updatePositions(double dt);
     void resetVelocities();
-    std::tuple<double, double, double, int> minimizeFIREStep(double dt, double alpha, int nPos, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5, int shakeIter = 5);
-    std::tuple<double, double, int> minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5, int shakeIter = 5);
+    std::tuple<double, double, double, int> minimizeFIREStep(double dt, double alpha, int nPos, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5);
+    std::tuple<double, double, int> minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5);
 
     // misc:
     void resetAreas();
@@ -180,8 +178,6 @@ private:
     double* velocities;
     double* fireScratchTMP;
     double* fireResultTMP;
-    int*    shakeItersTMP;
-    int     lastShakeIters;
 };
 
 #endif

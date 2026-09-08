@@ -13,7 +13,6 @@
 #include <cub/device/device_run_length_encode.cuh>
 #include "kernels.cuh"
 #include "FIRE.h"
-#include "shake.h"
 #include "cuda_check.h"
 
 using namespace std;
@@ -516,40 +515,6 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const dou
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const double2* tu, const double2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy) {
-    if (numIntersections <= 0) return;
-    int threads = 256;
-    int blocks = (numIntersections + threads - 1) / threads;
-    size_t smem = threads * sizeof(double);
-    updateForceEnergyExteriorKernel<<<blocks, threads, smem>>>(numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd) {
-    // Initialise with sentinel values
-    int initBlocks = (numPolygons + blockSize - 1) / blockSize;
-    initShapeRangesKernel<<<initBlocks, blockSize>>>(shapeStart, shapeEnd, numPolygons, numIntersections);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-    // Find actual ranges using atomicMin/Max
-    if (numIntersections == 0) return;
-    int blocks = (numIntersections + blockSize - 1) / blockSize;
-    updateShapeRangesKernel<<<blocks, blockSize>>>(intersections, numIntersections, shapeStart, shapeEnd);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const double2* tu, const double2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int numPolygons, int* shapeStart, int* shapeEnd) {
-    if (numIntersections == 0) return;
-    // Launch interior kernel
-    int threads = 256;
-    int grid = (numVertices + threads - 1) / threads;
-    updateForceEnergyInteriorKernel<<<grid, threads>>>(numVertices, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, shapeStart, shapeEnd);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
 extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
@@ -616,26 +581,6 @@ extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force) {
 // SHAKE constraint projection
 // One block per polygon, blockDim.x = n (vertices per polygon).
 // Shared memory size = (n*2 + n*2 + (n+1)*(n+1) + (n+1)) * sizeof(double)
-extern "C" int shakeProjectCUDA(int numPolygons, int n,
-                                 const int* startIndices, const int* next, const int* prev,
-                                 double* positions,
-                                 const double* targetEdgeLengths, const double* targetAreas,
-                                 int maxIter, double tol, int* maxIterOut) {
-    if (numPolygons == 0 || maxIter == 0) return 0;
-    CUDA_CHECK(cudaMemset(maxIterOut, 0, sizeof(int)));
-    int nc = n + 1;
-    size_t smem = (size_t)(n*2 + n*2 + nc*nc + nc + 1) * sizeof(double);
-    shakeProjectKernel<<<numPolygons, n, smem>>>(
-        numPolygons, startIndices, next, prev,
-        positions, targetEdgeLengths, targetAreas, maxIter, tol, maxIterOut);
-    CUDA_CHECK_KERNEL();
-    CUDA_CHECK(cudaDeviceSynchronize());
-    int result;
-    CUDA_CHECK(cudaMemcpy(&result, maxIterOut, sizeof(int), cudaMemcpyDeviceToHost));
-    return result;
-}
-
-// misc
 extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
     int threads = 256;
     int grid = (numVertices * 2 + threads - 1) / threads;

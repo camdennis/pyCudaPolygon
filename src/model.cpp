@@ -29,7 +29,6 @@ extern "C" void projectForceCUDA(int numVertices, int numPolygons, int n,
     int* solverInfoTMP, double* qAreaVec, cusolverDnHandle_t handle,
     double* workspace, int workspaceSize, double* hRnrmF, double* force);
 extern "C" int xpbdProjectCUDA(int numVertices, int numPolygons, int nIter, int* startIndices, int* shapeId, int* next, int* prev, double* positions, const double* targetEdgeLengths, const double* targetAreas, double* d_area, double* d_gradNormSq, double tol, double* convTMP);
-extern "C" int  shakeProjectCUDA(int numPolygons, int n, const int* startIndices, const int* next, const int* prev, double* positions, const double* targetEdgeLengths, const double* targetAreas, int maxIter, double tol, int* maxIterOut);
 extern "C" void saveTentativePositionsCUDA(int numVertices, const double* positions, double* positionsTMP);
 extern "C" double getMaxEffectiveForceCUDA(int numVertices, const double* positions, const double* positionsTMP, const double* force, double scale, double* effForceMagTMP);
 extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices);
@@ -39,12 +38,9 @@ extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int point
 extern "C" int updateValidAndCountsCUDA(int numVertices, int* neighbors, int* numNeighbors, int maxNeighbors, bool* insideFlag, int* shapeIds, int numShapes, int* valid, int* shapeCounts, uint64_t* outputIdx);
 extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbors, int* neighbors, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, double2* tu, double2* tuTMP);
 extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const double2* tu, const double2* ut, const int* startIndices, int numIntersections, uint64_t* outersections);
-extern "C" void updateForceEnergyExteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const double2* tu, const double2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy);
-extern "C" void updateForceEnergyInteriorCUDA(int numVertices, int numIntersections, const uint64_t* intersections, const uint64_t* outersections, const double2* tu, const double2* ut, const double* positions, const int* next, const int* prev, const int* shapeId, const int* startIndices, double* force, double* energy, int numPolygons, int* shapeStart, int* shapeEnd);
 extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt);
 extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness);
 extern "C" void updateForceEnergyAreaCUDA(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility);
-extern "C" void updateShapeRangesCUDA(int numPolygons, int numVertices, int numIntersections, const uint64_t* intersections, int* shapeStart, int* shapeEnd);
 // getters
 extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force);
 // FIRE
@@ -71,8 +67,7 @@ Model::Model(int size_)
       constraintNormSq(nullptr), mgsIp(nullptr), forceProjIp(nullptr),
       xpbdArea(nullptr), xpbdGradNormSq(nullptr),
       positionsTMP(nullptr), positionsTMP2(nullptr), effForceMagTMP(nullptr),
-      velocities(nullptr), fireScratchTMP(nullptr), fireResultTMP(nullptr),
-      shakeItersTMP(nullptr), lastShakeIters(0)
+      velocities(nullptr), fireScratchTMP(nullptr), fireResultTMP(nullptr)
 {
     CUDA_CHECK(cudaFree(0));
     CUDA_CHECK(cudaMalloc((void**)&positions, 2 * size * sizeof(double)));
@@ -89,7 +84,6 @@ Model::Model(int size_)
     CUDA_CHECK(cudaMalloc((void**)&velocities, 2 * size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&fireScratchTMP, 2 * size * sizeof(double)));
     CUDA_CHECK(cudaMalloc((void**)&fireResultTMP, sizeof(double)));
-    CUDA_CHECK(cudaMalloc((void**)&shakeItersTMP, sizeof(int)));
 
     CUDA_CHECK(cudaMalloc(&maxActualNeighbors, sizeof(int)));
     int init = INT_MIN;
@@ -145,7 +139,6 @@ Model::~Model() {
     if (velocities) CUDA_CHECK_NOABORT(cudaFree(velocities));
     if (fireScratchTMP) CUDA_CHECK_NOABORT(cudaFree(fireScratchTMP));
     if (fireResultTMP)            CUDA_CHECK_NOABORT(cudaFree(fireResultTMP));
-    if (shakeItersTMP)            CUDA_CHECK_NOABORT(cudaFree(shakeItersTMP));
     if (edgeGradTMP) CUDA_CHECK_NOABORT(cudaFree(edgeGradTMP));
     if (uMat) CUDA_CHECK_NOABORT(cudaFree(uMat));
     if (singularValuesTMP) CUDA_CHECK_NOABORT(cudaFree(singularValuesTMP));
@@ -314,17 +307,6 @@ void Model::updatePolygonGeometry() {
     updatePolygonGeometryCUDA(size, numPolygons, positions, startIndices, shapeId, next, prev, edgeLengths, areaParts, comParts, areas, comX, comY, maxEdgeLength, constraints, constraintNormSq);
 }
 
-int Model::shakeProject(int nIter, double tol) {
-    lastShakeIters = shakeProjectCUDA(numPolygons, polygonSize, startIndices, next, prev,
-                                      positions, targetEdgeLengths, targetAreas, nIter, tol,
-                                      shakeItersTMP);
-    return lastShakeIters;
-}
-
-int Model::getLastShakeIters() const {
-    return lastShakeIters;
-}
-
 void Model::saveTentativePositions() {
     saveTentativePositionsCUDA(size, positions, positionsTMP);
 }
@@ -366,9 +348,10 @@ void Model::updateForceEnergy() {
     CUDA_CHECK(cudaDeviceSynchronize());
     switch (simControl.modelType) {
         case simControlStruct::modelEnum::normal:
-            updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
-            updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
-            updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
+            // TODO(M5): the contact potential goes here.
+            // updateOutersections() has already run, so `intersections`,
+            // `outersections` and the tu/ut crossing parameters are available.
+            // Accumulate into `force` (2*size doubles) and `energy` (one double).
             return;
         case simControlStruct::modelEnum::softBody:
             updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
@@ -381,9 +364,7 @@ void Model::updateForceEnergy() {
             updateForceEnergyAreaCUDA(size, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
             return;
         case simControlStruct::modelEnum::hybrid:
-            updateForceEnergyExteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy);
-            updateShapeRangesCUDA(numPolygons, size, numIntersections, intersections, shapeStart, shapeEnd);
-            updateForceEnergyInteriorCUDA(size, numIntersections, intersections, outersections, tu, ut, positions, next, prev, shapeId, startIndices, force, energy, numPolygons, shapeStart, shapeEnd);
+            // TODO(M5): contact potential, as in the `normal` case above.
             updateForceEnergyEdgeCUDA(size, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
             updateForceEnergyAreaCUDA(size, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
             return;
@@ -402,12 +383,11 @@ void Model::resetVelocities() {
     CUDA_CHECK(cudaMemset(velocities, 0, 2 * size * sizeof(double)));
 }
 
-std::tuple<double, double, double, int> Model::minimizeFIREStep(double dt, double alpha, int nPos, double dtMax, double alphaStart, double fAlpha, double fInc, double fDec, int nMin, int shakeIter) {
+std::tuple<double, double, double, int> Model::minimizeFIREStep(double dt, double alpha, int nPos, double dtMax, double alphaStart, double fAlpha, double fInc, double fDec, int nMin) {
     bool needsIntersections = (simControl.modelType == simControlStruct::modelEnum::normal
                             || simControl.modelType == simControlStruct::modelEnum::hybrid);
     bool isRigid = (simControl.modelType == simControlStruct::modelEnum::normal);
-    bool shakeFailed = false;
-    // Save pre-step positions and energy for rollback on SHAKE failure or energy increase.
+    // Save pre-step positions and energy for rollback on energy increase.
     CUDA_CHECK(cudaMemcpy(positionsTMP2, positions, 2 * size * sizeof(double), cudaMemcpyDeviceToDevice));
     double ePre = getEnergy();
     updatePositionAndVelocityFIRECUDA(size, positions, velocities, force, dt);
@@ -415,38 +395,14 @@ std::tuple<double, double, double, int> Model::minimizeFIREStep(double dt, doubl
     if (needsIntersections) {
         updateNeighborCells();
         updateNeighbors();
-        if (isRigid && shakeIter > 0) {
-            // positionsTMP = post-Verlet positions, used for velocity rederivation on success.
-            CUDA_CHECK(cudaMemcpy(positionsTMP, positions, 2 * size * sizeof(double), cudaMemcpyDeviceToDevice));
-            shakeProject(shakeIter, 1e-15);
-            updatePolygonGeometry();
-            if (lastShakeIters >= shakeIter) {
-                // First attempt hit the limit — retry with 10x more iterations.
-                shakeProject(shakeIter * 10, 1e-15);
-                updatePolygonGeometry();
-                if (lastShakeIters >= shakeIter * 10) {
-                    shakeFailed = true;
-                }
-            }
-            if (shakeFailed) {
-                // Roll back to pre-step positions (near-zero violations) and reset FIRE.
-                CUDA_CHECK(cudaMemcpy(positions, positionsTMP2, 2 * size * sizeof(double), cudaMemcpyDeviceToDevice));
-                updatePolygonGeometry();
-                CUDA_CHECK(cudaMemset(velocities, 0, 2 * size * sizeof(double)));
-            } else {
-                rederiveVelocityFromDisplacementFIRECUDA(size, velocities, positions, positionsTMP, dt);
-            }
-        }
+        // TODO(M6): constraint projection goes here, between the Verlet update and
+        // the outersection rebuild. It must restore the edge-length and area
+        // constraints, rederive velocities from the actual displacement on success,
+        // and roll back to positionsTMP2 with a FIRE reset on failure.
         updateOutersections();
     }
     updateForceEnergy();
     if (isRigid) projectForce();
-    if (shakeFailed) {
-        dt = dt * fDec;
-        alpha = alphaStart;
-        nPos = 0;
-        return {getEnergy(), dt, alpha, nPos};
-    }
     // Roll back and reset if energy increased by more than floating-point noise.
     // Mixed tolerance prevents dt → 0 collapse from GPU-reduction non-determinism.
     double ePost = getEnergy();
@@ -485,7 +441,7 @@ std::tuple<double, double, double, int> Model::minimizeFIREStep(double dt, doubl
     return {getEnergy(), dt, alpha, nPos};
 }
 
-std::tuple<double, double, int> Model::minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax, double alphaStart, double fAlpha, double fInc, double fDec, int nMin, int shakeIter) {
+std::tuple<double, double, int> Model::minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax, double alphaStart, double fAlpha, double fInc, double fDec, int nMin) {
     resetVelocities();
     double dt = dtInit;
     double alpha = alphaStart;
@@ -496,7 +452,7 @@ std::tuple<double, double, int> Model::minimizeFIRE(double maxForceThreshold, do
     if (isRigid) projectForce();
     for (int step = 0; step < maxSteps; ++step) {
         double energy;
-        std::tie(energy, dt, alpha, nPos) = minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter);
+        std::tie(energy, dt, alpha, nPos) = minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin);
         if (getMaxUnbalancedForceCUDA(size, force) <= maxForceThreshold)
             return {energy, dt, step + 1};
     }

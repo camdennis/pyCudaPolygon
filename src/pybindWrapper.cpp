@@ -52,8 +52,6 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
         .def("projectForce", &Model::projectForce)
-        .def("shakeProject", &Model::shakeProject)
-        .def("getLastShakeIters", &Model::getLastShakeIters)
         .def("saveTentativePositions", &Model::saveTentativePositions)
         .def("getMaxEffectiveForce", &Model::getMaxEffectiveForce)
 .def("updateNeighborCells", &Model::updateNeighborCells)

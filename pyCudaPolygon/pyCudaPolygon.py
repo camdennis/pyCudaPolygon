@@ -508,12 +508,6 @@ class model(lpcp.Model, *mixins.values()):
     def projectForce(self):
         lpcp.Model.projectForce(self)
 
-    def shakeProject(self, nIter=100, tol=1e-15):
-        return lpcp.Model.shakeProject(self, nIter, tol)
-
-    def getLastShakeIters(self):
-        return lpcp.Model.getLastShakeIters(self)
-
     def saveTentativePositions(self):
         lpcp.Model.saveTentativePositions(self)
 
@@ -589,8 +583,7 @@ class model(lpcp.Model, *mixins.values()):
             self.projectForce()
         self.updatePositions(dt)
         actualIter = 0
-        if self.getModelEnum() == "normal" and nIter > 0:
-            self.shakeProject(nIter, tol)
+        # TODO(M6): constraint projection went here, gated on nIter > 0.
         self.updatePolygonGeometry()
         return self.getEnergy(), 0
 
@@ -646,11 +639,11 @@ class model(lpcp.Model, *mixins.values()):
         print(minIter, meanIter, maxIter)
         return energy, dt, np.array([minIter, meanIter, maxIter])
 
-    def minimizeFIREStep(self, dt, alpha, nPos, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5):
+    def minimizeFIREStep(self, dt, alpha, nPos, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5):
         """Single FIRE step. Returns (energy, dt, alpha, nPos)."""
-        return lpcp.Model.minimizeFIREStep(self, dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+        return lpcp.Model.minimizeFIREStep(self, dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin)
 
-    def minimizeFIRELoop(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False):
+    def minimizeFIRELoop(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, progressBar=False):
         """
         FIRE minimizer generator. Yields (energy, maxForce, dt, step) each step.
         Stops when maxForce <= maxForceThreshold or maxSteps is reached.
@@ -664,14 +657,14 @@ class model(lpcp.Model, *mixins.values()):
         nPos = 0
         with tqdm(total=maxSteps, desc="FIRE", disable=(not progressBar)) as pbar:
             for step in range(maxSteps):
-                energy, dt, alpha, nPos = self.minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin, shakeIter)
+                energy, dt, alpha, nPos = self.minimizeFIREStep(dt, alpha, nPos, dtMax, alphaStart, fAlpha, fInc, fDec, nMin)
                 maxForce = self.getMaxUnbalancedForce()
                 pbar.update(1)
                 yield energy, maxForce, dt, step + 1
                 if maxForce <= maxForceThreshold:
                     return
 
-    def minimizeFIRE(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, shakeIter=5, progressBar=False, checkpointDir=None, checkpointFreq=1, overwriteCheckpoint=False):
+    def minimizeFIRE(self, maxForceThreshold=1e-14, dt=1e-3, maxSteps=100000000, dtMax=0.1, alphaStart=0.1, fAlpha=0.99, fInc=1.1, fDec=0.5, nMin=5, progressBar=False, checkpointDir=None, checkpointFreq=1, overwriteCheckpoint=False):
         """
         FIRE minimizer. For the 'normal' model call
         updateNeighborCells/updateNeighbors/updateOutersections first.
@@ -701,25 +694,20 @@ class model(lpcp.Model, *mixins.values()):
         if maxSteps == 0:
             return self.getEnergy(), dt, 0
         energy, steps = self.getEnergy(), 0
-        minLoop = 1e9
-        maxLoop = 0
-        sumLoop = 0
         prevEnergy = 1e9
 
         for energy, _, dt, steps in self.minimizeFIRELoop(
                 maxForceThreshold=maxForceThreshold, dt=dt, maxSteps=maxSteps,
                 dtMax=dtMax, alphaStart=alphaStart, fAlpha=fAlpha,
-                fInc=fInc, fDec=fDec, nMin=nMin, shakeIter=shakeIter,
+                fInc=fInc, fDec=fDec, nMin=nMin,
                 progressBar=progressBar):
             if checkpointDir is not None and (steps % checkpointFreq == 0):
                 if not os.path.isdir(checkpointDir):
                     os.makedirs(checkpointDir)
                 self.saveModel(checkpointDir + "/" + str(steps), overwrite=overwriteCheckpoint)
                 print(self.getEnergy(), self.getMaxUnbalancedForce())
-            curr = self.getLastShakeIters()
-            minLoop = np.min((minLoop, curr))
-            maxLoop = np.max((maxLoop, curr))
-            sumLoop += curr
+            # TODO(M6): constraint-projection iteration statistics were collected
+            # here and returned as [min, mean, max]. Restore when SHAKE returns.
             if (np.abs(energy - prevEnergy) < 1e-15):
                 counter += 1
             if (counter > 5):
@@ -728,7 +716,7 @@ class model(lpcp.Model, *mixins.values()):
             
         if (steps == maxSteps):
             print("This may not have fully minimized")
-        return energy, dt, steps, np.array([minLoop, sumLoop / maxSteps, maxLoop])
+        return energy, dt, steps
 
     def saveModel(self, dirName, overwrite = False):
         if not overwrite and os.path.isdir(dirName):
