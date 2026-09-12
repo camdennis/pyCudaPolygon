@@ -1,7 +1,12 @@
-#from .pyCudaPolygonLink import libpyCudaPolygon as lpcp
-#from . import enums
-from pyCudaPolygonLink import libpyCudaPolygon as lpcp
-import enums
+if __package__:
+    # Imported as part of the pyCudaPolygon package: load the extension that
+    # CMake copies into this directory, so the package always uses its own build.
+    from . import libpyCudaPolygon as lpcp
+    from . import enums
+else:
+    # Imported as a top-level module, with this directory on sys.path.
+    from pyCudaPolygonLink import libpyCudaPolygon as lpcp
+    import enums
 
 import numpy as np
 from matplotlib import pyplot as plt

@@ -4,8 +4,10 @@ Dynamically detects enumerated types from libpyCudaPacking
 This module implicitly assumes that all enum supertypes
 end in "Enum"
 """
-#from .pyCudaPolygonLink import libpyCudaPolygon as lpcp
-import libpyCudaPolygon as lpcp
+if __package__:
+    from . import libpyCudaPolygon as lpcp       # the package's own build
+else:
+    import libpyCudaPolygon as lpcp
 
 __all__ = []
 for name in lpcp.__dict__:
