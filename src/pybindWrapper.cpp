@@ -37,7 +37,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         // setters        
 
         .def("setNumVertices", &Model::setNumVertices)
-        .def("setPositions", &Model::setPositions)
+        .def("setVertices", &Model::setVertices)
         .def("setForces", &Model::setForces)
         .def("setModelEnum", &Model::setModelEnum)
         .def("setStartIndices", &Model::setStartIndices)
@@ -52,16 +52,17 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
 
         .def("updatePolygonGeometry", &Model::updatePolygonGeometry)
         .def("projectForce", &Model::projectForce)
-        .def("saveTentativePositions", &Model::saveTentativePositions)
+        .def("saveTentativeVertices", &Model::saveTentativeVertices)
         .def("getMaxEffectiveForce", &Model::getMaxEffectiveForce)
 .def("updateNeighborCells", &Model::updateNeighborCells)
         .def("updateNeighbors", &Model::updateNeighbors)
         .def("updateValidAndCounts", &Model::updateValidAndCounts)
-        .def("updateCompactedIntersections", &Model::updateCompactedIntersections)
+        .def("updateIntersections", &Model::updateIntersections)
         .def("updateOutersections", &Model::updateOutersections)
-        .def("updateOverlapArea", &Model::updateOverlapArea)
+        .def("updateoverlapAreasGOLD", &Model::updateoverlapAreasGOLD)
+        .def("updateoverlapAreas", &Model::updateoverlapAreas)
         .def("updateForceEnergy", &Model::updateForceEnergy)
-        .def("updatePositions", &Model::updatePositions)
+        .def("updateVertices", &Model::updateVertices)
 
         // misc
         .def("resetAreas", &Model:: resetAreas)
@@ -71,7 +72,7 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getNumVertices", &Model::getNumVertices)
         .def("getNumPolygons", &Model::getNumPolygons)
         .def("getShapeId", &Model::getShapeId)
-        .def("getPositions", &Model::getPositions)
+        .def("getVertices", &Model::getVertices)
         .def("getIntersectionsCounter", &Model::getIntersectionsCounter)
         .def("getModelEnum", &Model::getModelEnum)
         .def("getStartIndices", &Model::getStartIndices)
@@ -99,7 +100,8 @@ PYBIND11_MODULE(libpyCudaPolygon, m) {
         .def("getEdgeLengths", &Model::getEdgeLengths)
         .def("getMaxUnbalancedForce", &Model::getMaxUnbalancedForce)
         .def("getCOM", &Model::getCOM)
-        .def("getOverlapArea", &Model::getOverlapArea)
+        .def("getoverlapAreasGOLD", &Model::getoverlapAreasGOLD)
+        .def("getoverlapAreas", &Model::getoverlapAreas)
         .def("resetVelocities", &Model::resetVelocities)
         .def("minimizeFIREStep", &Model::minimizeFIREStep)
         .def("minimizeFIRE", &Model::minimizeFIRE);

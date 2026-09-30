@@ -36,7 +36,7 @@ public:
     // setters
 
     void setNumVertices(int size);
-    void setPositions(const vector<double>& positions_);
+    void setVertices(const vector<double>& vertices_);
     void setForces(const vector<double>& forces_);
     void setStartIndices(const vector<int>& startIndices_);
     void setModelEnum(simControlStruct::modelEnum modelType_);
@@ -53,7 +53,7 @@ public:
     int getNumVertices() const;
     int getNumPolygons() const;
     vector<int> getShapeId() const;
-    vector<double> getPositions() const;
+    vector<double> getVertices() const;
     vector<int> getStartIndices() const;
     vector<int> getNeighborCells() const;
     vector<int> getBoxCounts() const;
@@ -82,24 +82,26 @@ public:
     vector<double> getCOM() const;
     double getMaxUnbalancedForce() const;
     vector<double> getEdgeLengths() const;
-    double getOverlapArea() const;
+    double getoverlapAreasGOLD() const;
+    double getoverlapAreas() const;
     vector<double> getConstraints() const;
 
     // updaters
 
     void updatePolygonGeometry();
     void projectForce();
-    void saveTentativePositions();
+    void saveTentativeVertices();
     double getMaxEffectiveForce(double dt, minimizerEnum minimizerType) const;
     void updateNeighborCells();
     void updateNeighbors();
-    void updateOverlapArea(int pointDensity_);
+    void updateoverlapAreasGOLD(int pointDensity_);
+    void updateoverlapAreas();
     void updateIntersectionsCounter();
     void updateValidAndCounts();
     void updateOutersections();
-    void updateCompactedIntersections();
+    void updateIntersections();
     void updateForceEnergy();
-    void updatePositions(double dt);
+    void updateVertices(double dt);
     void resetVelocities();
     std::tuple<double, double, double, int> minimizeFIREStep(double dt, double alpha, int nPos, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5);
     std::tuple<double, double, int> minimizeFIRE(double maxForceThreshold, double dtInit, int maxSteps, double dtMax = 0.1, double alphaStart = 0.1, double fAlpha = 0.99, double fInc = 1.1, double fDec = 0.5, int nMin = 5);
@@ -113,7 +115,7 @@ private:
     unsigned long long seed;
     curandState* globalState;
     double* energy;
-    double* positions;
+    double* vertices;
     int* startIndices;
     double* areas;
     double* targetEdgeLengths;
@@ -134,7 +136,8 @@ private:
     bool* inside;
     double* perimeters;
     int pointDensity = -1;
-    double overlapArea = 0.0;
+    double* overlapAreasGold;
+    double* overlapAreas;
     int* intersectionsCounter;
     int* valid;
     uint64_t* outputIdx;
@@ -172,8 +175,8 @@ private:
     double* hRnrmF = nullptr;
     double* xpbdArea;
     double* xpbdGradNormSq;
-    double* positionsTMP;
-    double* positionsTMP2;
+    double* verticesTMP;
+    double* verticesTMP2;
     double* effForceMagTMP;
     double* velocities;
     double* fireScratchTMP;

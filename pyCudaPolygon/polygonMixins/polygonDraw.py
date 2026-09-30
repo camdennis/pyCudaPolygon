@@ -21,7 +21,7 @@ class Mixin():
             py += minY - 0.5
             return px, py
         artists = []
-        pos = self.getPositions()
+        pos = self.getVertices()
         start = 0
         fStart = 0
         if ax is None:

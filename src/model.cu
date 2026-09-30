@@ -109,11 +109,11 @@ double maxAbsValue(double* d_data, int n) {
 
 // updaters
 
-extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* area, double* comX, double* comY, double* maxEdgeLength, double* constraints, double* constraintNormSq) {
+extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, double* vertices, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* area, double* comX, double* comY, double* maxEdgeLength, double* constraints, double* constraintNormSq) {
     int numBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
     // zero per-polygon squared-norm accumulators before the geometry kernel fills them
     CUDA_CHECK(cudaMemset(constraintNormSq, 0, 3 * numPolygons * sizeof(double)));
-    updatePolygonGeometryKernel<<<numBlocks, blockSize>>>(numVertices, numPolygons, positions, startIndices, shapeId, next, prev, edgeLengths, areaParts, comParts, constraints, constraintNormSq);
+    updatePolygonGeometryKernel<<<numBlocks, blockSize>>>(numVertices, numPolygons, vertices, startIndices, shapeId, next, prev, edgeLengths, areaParts, comParts, constraints, constraintNormSq);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
     void* d_temp_storage = nullptr;
@@ -150,7 +150,7 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
 
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, comX, comY, positions, startIndices);
+    normalizeKernel<<<numBlocks, blockSize>>>(numPolygons, comX, comY, vertices, startIndices);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -164,7 +164,7 @@ extern "C" void updatePolygonGeometryCUDA(int numVertices, int numPolygons, doub
 extern "C" void projectForceCUDA(
         int numVertices, int numPolygons, int n,
         const int* shapeId, const int* startIndices, const int* next,
-        const double* positions, const double* constraints,
+        const double* vertices, const double* constraints,
         double* edgeGradTMP, double* uMat,
         double* singularValuesTMP, double* vMatTMP, int* solverInfoTMP,
         double* qAreaVec, cusolverDnHandle_t handle,
@@ -174,7 +174,7 @@ extern "C" void projectForceCUDA(
 
     CUDA_CHECK(cudaMemset(edgeGradTMP, 0, matStride * numPolygons * sizeof(double)));
     buildEdgeGradMatrixKernel<<<numBlocks, blockSize>>>(
-        numVertices, shapeId, startIndices, next, positions, edgeGradTMP, n);
+        numVertices, shapeId, startIndices, next, vertices, edgeGradTMP, n);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -208,7 +208,7 @@ extern "C" void projectForceCUDA(
 extern "C" int xpbdProjectCUDA(
         int numVertices, int numPolygons, int nIter,
         int* startIndices, int* shapeId, int* next, int* prev,
-        double* positions, const double* targetEdgeLengths, const double* targetAreas,
+        double* vertices, const double* targetEdgeLengths, const double* targetAreas,
         double* d_area, double* d_gradNormSq, double tol, double* convTMP) {
     int numBlocks = (numVertices + blockSize - 1) / blockSize;
 
@@ -226,31 +226,31 @@ extern "C" int xpbdProjectCUDA(
     int iter = 0;
     for (; iter < nIter; ++iter) {
         xpbdEdgeProjectKernel<<<numBlocks, blockSize>>>(
-            numVertices, startIndices, shapeId, next, positions, targetEdgeLengths, 0);
+            numVertices, startIndices, shapeId, next, vertices, targetEdgeLengths, 0);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK(cudaDeviceSynchronize());
 
         xpbdEdgeProjectKernel<<<numBlocks, blockSize>>>(
-            numVertices, startIndices, shapeId, next, positions, targetEdgeLengths, 1);
+            numVertices, startIndices, shapeId, next, vertices, targetEdgeLengths, 1);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK(cudaDeviceSynchronize());
 
         CUDA_CHECK(cudaMemset(d_area,       0, numPolygons * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_gradNormSq, 0, numPolygons * sizeof(double)));
         xpbdAreaReductionKernel<<<numBlocks, blockSize>>>(
-            numVertices, shapeId, startIndices, next, prev, positions, d_area, d_gradNormSq);
+            numVertices, shapeId, startIndices, next, prev, vertices, d_area, d_gradNormSq);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK(cudaDeviceSynchronize());
 
         xpbdAreaCorrectionKernel<<<numBlocks, blockSize>>>(
-            numVertices, shapeId, startIndices, next, prev, positions,
+            numVertices, shapeId, startIndices, next, prev, vertices,
             d_area, d_gradNormSq, targetAreas);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK(cudaDeviceSynchronize());
 
         if (tol > 0) {
             xpbdEdgeDeviationKernel<<<numBlocks, blockSize>>>(
-                numVertices, shapeId, next, positions, targetEdgeLengths, convTMP);
+                numVertices, shapeId, next, vertices, targetEdgeLengths, convTMP);
             CUDA_CHECK_KERNEL();
             CUDA_CHECK(cudaDeviceSynchronize());
             CUDA_CHECK(cub::DeviceReduce::Max(dTemp, tempBytes, convTMP, dResult, numVertices));
@@ -276,16 +276,16 @@ extern "C" int xpbdProjectCUDA(
     return iter;
 }
 
-extern "C" void saveTentativePositionsCUDA(int numVertices, const double* positions, double* tentPos) {
-    CUDA_CHECK(cudaMemcpy(tentPos, positions, 2 * numVertices * sizeof(double), cudaMemcpyDeviceToDevice));
+extern "C" void saveTentativeVerticesCUDA(int numVertices, const double* vertices, double* tentPos) {
+    CUDA_CHECK(cudaMemcpy(tentPos, vertices, 2 * numVertices * sizeof(double), cudaMemcpyDeviceToDevice));
 }
 
 extern "C" double getMaxEffectiveForceCUDA(
-        int numVertices, const double* positions, const double* tentPos,
+        int numVertices, const double* vertices, const double* tentPos,
         const double* force, double scale, double* scratch) {
     int numBlocks = (numVertices + blockSize - 1) / blockSize;
     effectiveForceMagKernel<<<numBlocks, blockSize>>>(
-        numVertices, positions, tentPos, force, scale, scratch);
+        numVertices, vertices, tentPos, force, scale, scratch);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -304,9 +304,9 @@ extern "C" double getMaxEffectiveForceCUDA(
     return result;
 }
 
-extern "C" void updateNeighborCellsCUDA(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices) {
+extern "C" void updateNeighborCellsCUDA(double* vertices, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation, int* countPerBox, int* boxId, int& boxesUsed, int* neighborIndices) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborCellsKernel<<<numBlocks, blockSize>>>(positions, startIndices, shapeId, numPolygons, size, boxSize, cellLocation);
+    updateNeighborCellsKernel<<<numBlocks, blockSize>>>(vertices, startIndices, shapeId, numPolygons, size, boxSize, cellLocation);
     CUDA_CHECK_KERNEL();
 
     // Allocate temporary device memory for sorting
@@ -389,9 +389,9 @@ extern "C" void updateShapeIdCUDA(int* shapeId, int* startIndices, int size, int
     CUDA_CHECK_KERNEL();
 }
 
-extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* positions, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox, int* maxActualNeighbors, double2* tu, bool* inside) {
+extern "C" int updateNeighborsCUDA(int* shapeId, int* startIndices, double* vertices, int* cellLocation, int* neighborIndices,int size,int* neighbors,int* numNeighbors,int maxNeighbors,int boxSize,int* countPerBox, int* maxActualNeighbors, double2* tu, bool* inside) {
     int numBlocks = (size + blockSize - 1) / blockSize;
-    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, positions, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, tu, inside);
+    updateNeighborsKernel<<<numBlocks, blockSize>>>(shapeId, startIndices, vertices, cellLocation, neighborIndices, size, neighbors, numNeighbors, maxNeighbors, boxSize, countPerBox, tu, inside);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -448,12 +448,12 @@ extern "C" int updateValidAndCountsCUDA(int numVertices, int* contacts, int* num
     return lastOutputIdx + lastValid;
 }
 
-extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, double2* tu, double2* tuTMP) {
+extern "C" void updateIntersectionsCUDA(int numVertices, int maxNeighbors, int* contacts, bool* insideFlag, int* shapeIds, int* startIndices, int* valid, uint64_t* outputIdx, uint64_t* intersections, int numIntersections, double2* tu, double2* tuTMP) {
     int numThreads = numVertices * maxNeighbors;
     int numBlocks = (numThreads + blockSize - 1) / blockSize;
     // Write compacted tu into tuTMP (separate buffer) to avoid the in-place scatter
     // race where outPos[b] == idx[a] causes thread b's store to corrupt thread a's load.
-    updateCompactedIntersectionsKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, startIndices, valid, outputIdx, intersections, tu, tuTMP);
+    updateIntersectionsKernel<<<numBlocks, blockSize>>>(numVertices, maxNeighbors, contacts, insideFlag, shapeIds, startIndices, valid, outputIdx, intersections, tu, tuTMP);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
     // Copy compacted result back into tu
@@ -462,12 +462,12 @@ extern "C" void updateCompactedIntersectionsCUDA(int numVertices, int maxNeighbo
     }
 }
 
-extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int pointDensity, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* positions, double& overlapArea) {
+extern "C" void updateoverlapAreasGOLDCUDA(int* shapeId, int* startIndices, int pointDensity, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* vertices, double* overlapAreasGold) {
     int total = pointDensity * pointDensity;
     int numBlocks = (total + blockSize - 1) / blockSize;
-    updateOverlapAreaKernel<<<numBlocks, blockSize>>>(
+    updateOverlapAreaGOLDKernel<<<numBlocks, blockSize>>>(
         shapeId, startIndices, pointDensity, intersectionsCounter,
-        neighborIndices, size, boxSize, countPerBox, positions
+        neighborIndices, size, boxSize, countPerBox, vertices, overlapAreas
     );
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -498,7 +498,51 @@ extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int point
     // Copy result back
     long long sum;
     CUDA_CHECK(cudaMemcpy(&sum, d_result, sizeof(long long), cudaMemcpyDeviceToHost));
-    overlapArea = (double)sum;
+    overlapAreaGold = (double)sum;
+
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_temp_storage));
+    CUDA_CHECK(cudaFree(d_result));
+}
+
+
+
+extern "C" void updateOverlapAreaCUDA(int* shapeId, int* startIndices, int* intersectionsCounter, int* neighborIndices, int size, int boxSize, int* countPerBox, double* vertices, double* overlapAreas) {
+    int numBlocks = (total + blockSize - 1) / blockSize;
+    updateoverlapAreasKernel<<<numBlocks, blockSize>>>(
+        shapeId, startIndices, pointDensity, intersectionsCounter,
+        neighborIndices, size, boxSize, countPerBox, vertices
+    );
+    CUDA_CHECK_KERNEL();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // CUB reduce: sum all values in intersectionsCounter
+    long long* d_result;
+    CUDA_CHECK(cudaMalloc(&d_result, sizeof(long long)));
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+
+    // First pass: determine temp storage requirements
+    CUDA_CHECK(cub::DeviceReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        intersectionsCounter, d_result, total
+    ));
+
+    // Allocate temporary storage
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+
+    // Second pass: perform the reduction
+    CUDA_CHECK(cub::DeviceReduce::Sum(
+        d_temp_storage, temp_storage_bytes,
+        intersectionsCounter, d_result, total
+    ));
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy result back
+    long long sum;
+    CUDA_CHECK(cudaMemcpy(&sum, d_result, sizeof(long long), cudaMemcpyDeviceToHost));
+    overlapAreasGold = (double)sum;
 
     // Cleanup
     CUDA_CHECK(cudaFree(d_temp_storage));
@@ -515,32 +559,32 @@ extern "C" void updateOutersectionsCUDA(const uint64_t* intersections, const dou
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
+extern "C" void updateForceEnergyEdgeCUDA(int numVertices, const double* vertices, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
-    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, positions, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
+    updateForceEnergyEdgeKernel<<<grid, threads>>>(numVertices, vertices, targetEdgeLengths, edgeLengths, next, prev, shapeId, force, energy, stiffness);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updateForceEnergyAreaCUDA(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
+extern "C" void updateForceEnergyAreaCUDA(int numVertices, const int* shapeId, const int* next, const int* prev, const double* vertices, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
     int threads = 256;
     int grid = (numVertices + threads - 1) / threads;
-    updateForceEnergyAreaKernel<<<grid, threads>>>(numVertices, shapeId, next, prev, positions, areas, targetAreas, startIndices, force, energy, compressibility);
+    updateForceEnergyAreaKernel<<<grid, threads>>>(numVertices, shapeId, next, prev, vertices, areas, targetAreas, startIndices, force, energy, compressibility);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updatePositionsCUDA(int numVertices, double* positions, const double* force, double dt) {
+extern "C" void updateVerticesCUDA(int numVertices, double* vertices, const double* force, double dt) {
     int initBlocks = (numVertices * 2 + blockSize - 1) / blockSize;
-    updatePositionsKernel<<<initBlocks, blockSize>>>(numVertices, positions, force, dt);
+    updateVerticesKernel<<<initBlocks, blockSize>>>(numVertices, vertices, force, dt);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
-extern "C" void updatePositionAndVelocityFIRECUDA(int numVertices, double* positions, double* velocities, const double* force, double dt) {
+extern "C" void updatePositionAndVelocityFIRECUDA(int numVertices, double* vertices, double* velocities, const double* force, double dt) {
     int blocks = (numVertices + blockSize - 1) / blockSize;
-    updatePositionAndVelocityFIREKernel<<<blocks, blockSize>>>(numVertices, positions, velocities, force, dt);
+    updatePositionAndVelocityFIREKernel<<<blocks, blockSize>>>(numVertices, vertices, velocities, force, dt);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -581,10 +625,10 @@ extern "C" double getMaxUnbalancedForceCUDA(int numVertices, double* force) {
 // SHAKE constraint projection
 // One block per polygon, blockDim.x = n (vertices per polygon).
 // Shared memory size = (n*2 + n*2 + (n+1)*(n+1) + (n+1)) * sizeof(double)
-extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
+extern "C" void resetAreasCUDA(const int numVertices, const int* shapeId, double* vertices, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
     int threads = 256;
     int grid = (numVertices * 2 + threads - 1) / threads;
-    resetAreasKernel<<<grid, threads>>>(numVertices, shapeId, positions, areas, targetAreas, comX, comY);
+    resetAreasKernel<<<grid, threads>>>(numVertices, shapeId, vertices, areas, targetAreas, comX, comY);
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaDeviceSynchronize());
 }

@@ -241,15 +241,15 @@ __global__ void initIndicesKernel(uint32_t* indices, int n) {
 
 // updaters
 
-__global__ void updateAreasCOMKernel(double* areas, double* positions, int* startIndices, int numPolygons) {
+__global__ void updateAreasCOMKernel(double* areas, double* vertices, int* startIndices, int numPolygons) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numPolygons) {
         int start = startIndices[idx];
         int end = startIndices[idx + 1];
-        double startY = positions[2 * start + 1];
+        double startY = vertices[2 * start + 1];
         double dx, dy1, dy2;
         for (int i = start; i < end - 1; i++) {
-            dx = (positions[2 * i] - positions[2 * i + 2] + 0.5);
+            dx = (vertices[2 * i] - vertices[2 * i + 2] + 0.5);
             while (dx < 0.0) {
                 dx += 1;
             }
@@ -257,14 +257,14 @@ __global__ void updateAreasCOMKernel(double* areas, double* positions, int* star
                 dx -= 1.0;
             }
             dx -= 0.5;
-            dy1 = (positions[2 * i + 1] - startY + 0.5);
+            dy1 = (vertices[2 * i + 1] - startY + 0.5);
             while (dy1 < 0.0) {
                 dy1 += 1;
             }
             while (dy1 > 1.0) {
                 dy1 -= 1.0;
             }
-            dy2 = (positions[2 * i + 3] - startY + 0.5);
+            dy2 = (vertices[2 * i + 3] - startY + 0.5);
             while (dy2 < 0.0) {
                 dy2 += 1;
             }
@@ -273,7 +273,7 @@ __global__ void updateAreasCOMKernel(double* areas, double* positions, int* star
             }
             areas[idx] += dx * (dy1 + dy2 - 1.0 + 2.0 * startY) / 2.0;
         }
-        dx = (positions[2 * end - 2] - positions[2 * start] + 0.5);
+        dx = (vertices[2 * end - 2] - vertices[2 * start] + 0.5);
         while (dx < 0.0) {
             dx += 1;
         }
@@ -281,7 +281,7 @@ __global__ void updateAreasCOMKernel(double* areas, double* positions, int* star
             dx -= 1.0;
         }
         dx -= 0.5;
-        dy1 = (positions[2 * end - 1] - startY + 0.5);
+        dy1 = (vertices[2 * end - 1] - startY + 0.5);
         while (dy1 < 0.0) {
             dy1 += 1;
         }
@@ -292,19 +292,19 @@ __global__ void updateAreasCOMKernel(double* areas, double* positions, int* star
     }
 }
 
-__global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, double* positions, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* constraints, double* constraintNormSq) {
+__global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, double* vertices, int* startIndices, int* shapeId, int* next, int* prev, double* edgeLengths, double* areaParts, double* comParts, double* constraints, double* constraintNormSq) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
     int k = idx / 2;
     int alpha = idx % 2;
     int startIndex = startIndices[shapeId[k]];
 
-    double x1 = wrap(positions[idx] - positions[startIndex * 2 + alpha]);
-    double x4 = wrap(positions[prev[k] * 2 + 1 - alpha] - positions[next[k] * 2 + 1 - alpha]);
-    double dxPrev = wrap(positions[2 * k] - positions[prev[k] * 2]);
-    double dyPrev = wrap(positions[2 * k + 1] - positions[prev[k] * 2 + 1]);
-    double dxNext = wrap(positions[2 * k] - positions[next[k] * 2]);
-    double dyNext = wrap(positions[2 * k + 1] - positions[next[k] * 2 + 1]);
+    double x1 = wrap(vertices[idx] - vertices[startIndex * 2 + alpha]);
+    double x4 = wrap(vertices[prev[k] * 2 + 1 - alpha] - vertices[next[k] * 2 + 1 - alpha]);
+    double dxPrev = wrap(vertices[2 * k] - vertices[prev[k] * 2]);
+    double dyPrev = wrap(vertices[2 * k + 1] - vertices[prev[k] * 2 + 1]);
+    double dxNext = wrap(vertices[2 * k] - vertices[next[k] * 2]);
+    double dyNext = wrap(vertices[2 * k + 1] - vertices[next[k] * 2 + 1]);
     comParts[k + numVertices * alpha] = x1;
 
     double lenPrev = sqrt(dxPrev * dxPrev + dyPrev * dyPrev);
@@ -324,11 +324,11 @@ __global__ void updatePolygonGeometryKernel(int numVertices, int numPolygons, do
     atomicAdd(&constraintNormSq[3 * p + 2], edgeComp * edgeComp);
 
     if (alpha) return;
-    double dx = wrap(positions[2 * next[k]] - positions[2 * k]);
-    double dy = wrap(positions[2 * next[k] + 1] - positions[2 * k + 1]);
+    double dx = wrap(vertices[2 * next[k]] - vertices[2 * k]);
+    double dy = wrap(vertices[2 * next[k] + 1] - vertices[2 * k + 1]);
     edgeLengths[k] = sqrt(dx * dx + dy * dy);
-    double dy2 = wrap(positions[next[k] * 2 + 1] - positions[idx + 1]);
-    double x2 = wrap(positions[next[k] * 2 + alpha] - positions[startIndex * 2 + alpha]);
+    double dy2 = wrap(vertices[next[k] * 2 + 1] - vertices[idx + 1]);
+    double x2 = wrap(vertices[next[k] * 2 + alpha] - vertices[startIndex * 2 + alpha]);
     areaParts[k] = dy2 * (x2 + x1) / 2.0;
 }
 
@@ -388,13 +388,13 @@ __global__ void forceProjectionKernel(int numVertices, int* shapeId, const doubl
 
 __global__ void buildEdgeGradMatrixKernel(
         int numVertices, const int* shapeId, const int* startIndices,
-        const int* next, const double* positions, double* edgeGradTMP, int n) {
+        const int* next, const double* vertices, double* edgeGradTMP, int n) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
     int p = shapeId[k];
     int k_loc = k - startIndices[p];
-    double dx = wrap(positions[2*next[k]]   - positions[2*k]);
-    double dy = wrap(positions[2*next[k]+1] - positions[2*k+1]);
+    double dx = wrap(vertices[2*next[k]]   - vertices[2*k]);
+    double dy = wrap(vertices[2*next[k]+1] - vertices[2*k+1]);
     double len = sqrt(dx*dx + dy*dy);
     if (len < 1e-14) return;
     double tx = dx / len, ty = dy / len;
@@ -531,7 +531,7 @@ __global__ void forceProjectFullKernel(
 // share a vertex, so direct (non-atomic) writes are safe.
 __global__ void xpbdEdgeProjectKernel(
         int numVertices, const int* startIndices, const int* shapeId,
-        const int* next, double* positions,
+        const int* next, double* vertices,
         const double* targetEdgeLengths, int color) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
@@ -539,80 +539,86 @@ __global__ void xpbdEdgeProjectKernel(
     if ((k - startIndices[p]) % 2 != color) return;
 
     int nk = next[k];
-    double ex = wrap(positions[2*nk]   - positions[2*k]);
-    double ey = wrap(positions[2*nk+1] - positions[2*k+1]);
-    double len = sqrt(ex*ex + ey*ey);
+    double ex = wrap(vertices[2 * nk] - vertices[2 * k]);
+    double ey = wrap(vertices[2 * nk + 1] - vertices[2 * k + 1]);
+    double len = sqrt(ex * ex + ey * ey);
     if (len < 1e-14) return;
 
-    double c = 0.5 * (len - targetEdgeLengths[p]) / len;
-    positions[2*k]     += c * ex;
-    positions[2*k+1]   += c * ey;
-    positions[2*nk]    -= c * ex;
-    positions[2*nk+1]  -= c * ey;
+    double target = targetEdgeLengths[k];
+    vertices[2 * k]  += (0.5 * (len - target) / len) * ex;
+    vertices[2 * k + 1] += (0.5 * (len - target) / len) * ey;
+    vertices[2 * nk] -= (0.5 * (len - target) / len) * ex;
+    vertices[2 * nk + 1] -= (0.5 * (len - target) / len) * ey;
 }
 
 // Pass 1 of area projection: accumulate current signed area and ||grad A||^2
 // per polygon using atomic adds into pre-zeroed scratch buffers.
 __global__ void xpbdAreaReductionKernel(
         int numVertices, const int* shapeId, const int* startIndices,
-        const int* next, const int* prev, const double* positions,
+        const int* next, const int* prev, const double* vertices,
         double* d_area, double* d_gradNormSq) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
-    int p  = shapeId[k];
-    int s  = startIndices[p];
+    int p = shapeId[k];
+    int s = startIndices[p];
     int nk = next[k], pk = prev[k];
 
-    // MIC-wrapped positions relative to polygon start vertex
-    double xs  = positions[2*s],     ys  = positions[2*s+1];
-    double xk  = wrap(positions[2*k]   - xs), yk  = wrap(positions[2*k+1]   - ys);
-    double xnk = wrap(positions[2*nk]  - xs), ynk = wrap(positions[2*nk+1]  - ys);
-    double xpk = wrap(positions[2*pk]  - xs), ypk = wrap(positions[2*pk+1]  - ys);
+    // MIC-wrapped vertices relative to polygon start vertex
+    double xs = vertices[2 * s];
+    double ys = vertices[2 * s + 1];
+    double xk = wrap(vertices[2 * k] - xs);
+    double yk  = wrap(vertices[2 * k + 1] - ys);
+    double xnk = wrap(vertices[2 * nk] - xs);
+    double ynk = wrap(vertices[2 * nk + 1] - ys);
+    double xpk = wrap(vertices[2 * pk] - xs);
+    double ypk = wrap(vertices[2 * pk + 1] - ys);
 
     // Shoelace contribution: 0.5*(x_k * y_{k+1} - x_{k+1} * y_k)
     atomicAdd(&d_area[p], 0.5 * (xk * ynk - xnk * yk));
 
-    // Gradient: dA/dx_k = 0.5*(y_{k+1}' - y_{k-1}'), dA/dy_k = 0.5*(x_{k-1}' - x_{k+1}')
     double gx = 0.5 * (ynk - ypk);
     double gy = 0.5 * (xpk - xnk);
-    atomicAdd(&d_gradNormSq[p], gx*gx + gy*gy);
+    atomicAdd(&d_gradNormSq[p], gx * gx + gy * gy);
 }
 
 // Pass 2 of area projection: apply correction delta_x_k = -alpha * grad_k A
 // where alpha = (A - A0) / ||grad A||^2.
 __global__ void xpbdAreaCorrectionKernel(
         int numVertices, const int* shapeId, const int* startIndices,
-        const int* next, const int* prev, double* positions,
+        const int* next, const int* prev, double* vertices,
         const double* d_area, const double* d_gradNormSq,
         const double* targetAreas) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
-    int p  = shapeId[k];
-    int s  = startIndices[p];
+    int p = shapeId[k];
+    int s = startIndices[p];
     int nk = next[k], pk = prev[k];
 
     double alpha = (d_area[p] - targetAreas[p]) / fmax(d_gradNormSq[p], 1e-24);
 
-    double xs  = positions[2*s],     ys  = positions[2*s+1];
-    double xnk = wrap(positions[2*nk]  - xs), ynk = wrap(positions[2*nk+1]  - ys);
-    double xpk = wrap(positions[2*pk]  - xs), ypk = wrap(positions[2*pk+1]  - ys);
+    double xs  = vertices[2 * s];
+    double ys  = vertices[2 * s + 1];
+    double xnk = wrap(vertices[2 * nk] - xs);
+    double ynk = wrap(vertices[2 * nk + 1]  - ys);
+    double xpk = wrap(vertices[2 * pk] - xs);
+    double ypk = wrap(vertices[2 * pk + 1]  - ys);
     double gx  = 0.5 * (ynk - ypk);
     double gy  = 0.5 * (xpk - xnk);
 
-    positions[2*k]   -= alpha * gx;
-    positions[2*k+1] -= alpha * gy;
+    vertices[2 * k] -= alpha * gx;
+    vertices[2 * k + 1] -= alpha * gy;
 }
 
 __global__ void xpbdEdgeDeviationKernel(
         int numVertices, const int* shapeId, const int* next,
-        const double* positions, const double* targetEdgeLengths, double* dev) {
+        const double* vertices, const double* targetEdgeLengths, double* dev) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
     int p = shapeId[k];
     int nk = next[k];
-    double ex = wrap(positions[2*nk]   - positions[2*k]);
-    double ey = wrap(positions[2*nk+1] - positions[2*k+1]);
-    dev[k] = fabs(sqrt(ex*ex + ey*ey) - targetEdgeLengths[p]);
+    double ex = wrap(vertices[2 * nk] - vertices[2 * k]);
+    double ey = wrap(vertices[2 * nk + 1] - vertices[2 * k + 1]);
+    dev[k] = fabs(sqrt(ex * ex + ey * ey) - targetEdgeLengths[p]);
 }
 
 __global__ void xpbdAreaDeviationKernel(
@@ -623,28 +629,28 @@ __global__ void xpbdAreaDeviationKernel(
 }
 
 __global__ void effectiveForceMagKernel(
-        int numVertices, const double* positions, const double* tentPos,
+        int numVertices, const double* vertices, const double* tentPos,
         const double* force, double scale, double* mag) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= numVertices) return;
-    double fx = force[2*k]   + scale * (positions[2*k]   - tentPos[2*k]);
-    double fy = force[2*k+1] + scale * (positions[2*k+1] - tentPos[2*k+1]);
-    mag[k] = sqrt(fx*fx + fy*fy);
+    double fx = force[2 * k]   + scale * (vertices[2 * k] - tentPos[2 * k]);
+    double fy = force[2 * k + 1] + scale * (vertices[2 * k + 1] - tentPos[2 * k + 1]);
+    mag[k] = sqrt(fx * fx + fy * fy);
 }
 
-__global__ void normalizeKernel(int numPolygons, double* comX, double* comY, double* positions, int* startIndices) {
+__global__ void normalizeKernel(int numPolygons, double* comX, double* comY, double* vertices, int* startIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numPolygons) return;
     int n = startIndices[i + 1] - startIndices[i];
     int startIdx = startIndices[i];
     double comx = comX[i];
     comx /= ((double) n);
-    comx += positions[2 * startIdx];
+    comx += vertices[2 * startIdx];
     comx -= floor(comx);
     comX[i] = comx;
     double comy = comY[i];
     comy /= ((double) n);
-    comy += positions[2 * startIdx + 1];
+    comy += vertices[2 * startIdx + 1];
     comy -= floor(comy);
     comY[i] = comy;
 }
@@ -658,15 +664,15 @@ __global__ void updateShapeIdKernel(int* shapeId, int* startIndices, int numPoly
     }
 }
 
-__global__ void updateNeighborCellsKernel(double* positions, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation) {
+__global__ void updateNeighborCellsKernel(double* vertices, int* startIndices, int* shapeId, int numPolygons, int size, int boxSize, int* cellLocation) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         int v2 = idx + 1;
         if (idx == size - 1 || shapeId[idx] != shapeId[idx + 1]) {
             v2 = startIndices[shapeId[idx]];
         }
-        double x = positions[v2 * 2] - positions[idx * 2] + 0.5;
-        double y = positions[v2 * 2 + 1] - positions[idx * 2 + 1] + 0.5;
+        double x = vertices[v2 * 2] - vertices[idx * 2] + 0.5;
+        double y = vertices[v2 * 2 + 1] - vertices[idx * 2 + 1] + 0.5;
         while (x < 0.0) {
             x += 1.0;
         }
@@ -683,8 +689,8 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         y -= 0.5;
         x /= 2.0;
         y /= 2.0;
-        x += positions[idx * 2];
-        y += positions[idx * 2 + 1];
+        x += vertices[idx * 2];
+        y += vertices[idx * 2 + 1];
         while (x < 0.0) {
             x += 1.0;
         }
@@ -699,14 +705,14 @@ __global__ void updateNeighborCellsKernel(double* positions, int* startIndices, 
         }
         int ix = (int)floor(x * boxSize);
         int iy = (int)floor(y * boxSize);
-        // Clamp: NaN/Inf positions produce INT_MIN from (int); clamp to valid cell range.
+        // Clamp: NaN/Inf vertices produce INT_MIN from (int); clamp to valid cell range.
         if (ix < 0) ix = 0; else if (ix >= boxSize) ix = boxSize - 1;
         if (iy < 0) iy = 0; else if (iy >= boxSize) iy = boxSize - 1;
         cellLocation[idx] = iy * boxSize + ix;
     }
 }
 
-__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ positions, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, double2* __restrict__ tu,  bool* __restrict__ inside) {
+__global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, const double* __restrict__ vertices, const int* __restrict__ cellLocation, const int* __restrict__ neighborIndices, const int size, int* __restrict__ neighbors, int* __restrict__ numNeighbors, int maxNeighbors, int boxSize, int* __restrict__ countPerBox, double2* __restrict__ tu,  bool* __restrict__ inside) {
     const double eps = 1e-12;
     int id1 = blockIdx.x * blockDim.x + threadIdx.x;
     if (id1 >= size) return;
@@ -718,11 +724,11 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
     int st = startIndices[shape + 1] - 1;
     int id2 = (id1 == st) ? startIndices[shape] : id1 + 1;
 
-    const double px = positions[2 * id1];
-    const double py = positions[2 * id1 + 1];
+    const double px = vertices[2 * id1];
+    const double py = vertices[2 * id1 + 1];
 
-    double rx = wrap(positions[2 * id2] - px);
-    double ry = wrap(positions[2 * id2 + 1] - py);
+    double rx = wrap(vertices[2 * id2] - px);
+    double ry = wrap(vertices[2 * id2 + 1] - py);
 
     int box = cellLocation[id1];
     int bx = box % boxSize;
@@ -774,12 +780,12 @@ __global__ void updateNeighborsKernel(const int* __restrict__ shapeId, const int
                 // skip trivial/adjacent edges
                 if (nid == id1 || nid == id2 || nid2 == id1 || nid2 == id2) continue;
 
-                // positions of neighbor edge
-                double qx = positions[2 * nid];
-                double qy = positions[2 * nid + 1];
+                // vertices of neighbor edge
+                double qx = vertices[2 * nid];
+                double qy = vertices[2 * nid + 1];
 
-                double sx = wrap(positions[2 * nid2] - qx);
-                double sy = wrap(positions[2 * nid2 + 1] - qy);
+                double sx = wrap(vertices[2 * nid2] - qx);
+                double sy = wrap(vertices[2 * nid2 + 1] - qy);
                 double gx = wrap(qx - px);
                 double gy = wrap(qy - py);
 
@@ -835,7 +841,7 @@ __global__ void updateValidAndCountsKernel(const int numVertices, const int* __r
     }
 }
 
-__global__ void updateCompactedIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, const double2* __restrict__ tuSrc, double2* __restrict__ tuOut) {
+__global__ void updateIntersectionsKernel(const int numVertices, const int maxNeighbors, const int* __restrict__ neighbors, const bool* __restrict__ insideFlag, const int* __restrict__ shapeIds, const int* __restrict__ startIndices, const int* __restrict__ valid, const uint64_t* __restrict__ outputIdx, uint64_t* __restrict__ intersections, const double2* __restrict__ tuSrc, double2* __restrict__ tuOut) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalNeighbors = numVertices * maxNeighbors;
     if (idx >= totalNeighbors) return;
@@ -854,8 +860,8 @@ __global__ void updateCompactedIntersectionsKernel(const int numVertices, const 
     // Convention (established in updateNeighborsKernel and relied on throughout):
     //   tu.y = parameter along si's edge (inner shape, bits [47:32] of packed)
     //   tu.x = parameter along sj's edge (outer shape, bits [63:48] of packed)
-    float tVal = tuSrc[idx].x;
-    float uVal = tuSrc[idx].y;
+    double tVal = tuSrc[idx].x;
+    double uVal = tuSrc[idx].y;
 
     // Pack 64-bit intersection exactly as Python's pack()
     uint64_t packed;
@@ -876,7 +882,7 @@ __global__ void updateCompactedIntersectionsKernel(const int numVertices, const 
     tuOut[outPos] = make_double2(tVal, uVal);
 }
 
-__global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, int pointDensity, int* __restrict__ intersectionsCounter, const int* __restrict__ neighborIndices, int size, int boxSize, const int* __restrict__ countPerBox, const double* __restrict__ positions) {
+__global__ void updateoverlapAreasGOLDKernel(const int* __restrict__ shapeId, const int* __restrict__ startIndices, int pointDensity, int* __restrict__ intersectionsCounter, const int* __restrict__ neighborIndices, int size, int boxSize, const int* __restrict__ countPerBox, const double* __restrict__ vertices, double* overlapAreasGOLD) {
     const double eps = 1e-12;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int totalPoints = pointDensity * pointDensity;
@@ -902,14 +908,17 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
     // rather than silently double-counting polygons.
     int trackedPolys[512];
     int numTrackedPolys = 0;
+    bool overflowFlag = false;
 
     // Iterate over 3x3 neighboring boxes
     for (int dx = -1; dx <= 1; dx++) {
+        if (overflowFlag) break;
         int nx = cellX + dx;
         if (nx < 0) nx += boxSize;
         else if (nx >= boxSize) nx -= boxSize;
 
         for (int dy = -1; dy <= 1; dy++) {
+            if (overflowFlag) break;
             int ny = cellY + dy;
             if (ny < 0) ny += boxSize;
             else if (ny >= boxSize) ny -= boxSize;
@@ -938,14 +947,14 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
 
                 // Angle-sum test
                 double angleSum = 0.0;
-                double vxPrev = wrapPeriodic(positions[2 * start] - px);
-                double vyPrev = wrapPeriodic(positions[2 * start + 1] - py);
+                double vxPrev = wrapPeriodic(vertices[2 * start] - px);
+                double vyPrev = wrapPeriodic(vertices[2 * start + 1] - py);
                 double vx0 = vxPrev + 0.0;
                 double vy0 = vyPrev + 0.0;
 
                 for (int e = start + 1; e < end; e++) {
-                    double vx = vxPrev + wrapPeriodic(positions[2 * e] - positions[2 * e - 2]);
-                    double vy = vyPrev + wrapPeriodic(positions[2 * e + 1] - positions[2 * e - 1]);
+                    double vx = vxPrev + wrapPeriodic(vertices[2 * e] - vertices[2 * e - 2]);
+                    double vy = vyPrev + wrapPeriodic(vertices[2 * e + 1] - vertices[2 * e - 1]);
 
                     double cross = vxPrev * vy - vyPrev * vx;
                     double dot = vxPrev * vx + vyPrev * vy;
@@ -966,16 +975,14 @@ __global__ void updateOverlapAreaKernel(const int* __restrict__ shapeId, const i
                 if (numTrackedPolys < 512) {
                     trackedPolys[numTrackedPolys++] = polyId;
                 } else {
-                    // Array full — stop searching to preserve correctness.
-                    goto done;
+                    // you overflowed
+                    overflowFlag = true;
+                    break;
                 }
             }
         }
     }
-
-    done:
     intersectionsCounter[idx] = numIntersections * (numIntersections - 1) / 2;
-//    intersectionsCounter[idx] = numIntersections;
 }
 
 __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersections, const double2* __restrict__ tu, double2* __restrict__ ut, const int* __restrict__ startIndices, int numIntersections, uint64_t* __restrict__ outersections) {
@@ -989,7 +996,7 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     int ni = startIndices[si + 1] - startIndices[si];
     uint64_t sij = ((uint64_t)si << 48) | ((uint64_t)sj << 32);
         
-    float tVal = tu[idx].y;
+    double tVal = tu[idx].y;
     int start = 0;
     int end = numIntersections - 1;
     int mid;
@@ -1002,15 +1009,15 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     
 
     int bestDist = -1;
-    float bestU = FLT_MAX;
+    double bestU = FLT_MAX;
     int bestIdx = -1;
-    float fallbackU = FLT_MAX;
+    double fallbackU = FLT_MAX;
     int fallbackIdx = -1;
     int k = start;
     while (k < numIntersections && intersections[k] < ub) {
         uint64_t kInter = intersections[k];
         int l = kInter & 0xFFFF;
-        float uVal = tu[k].x;
+        double uVal = tu[k].x;
 
         int d = (l - i + ni) % ni;
 
@@ -1064,24 +1071,24 @@ __global__ void updateOutersectionsKernel(const uint64_t* __restrict__ intersect
     ut[idx] = tu[player];
 }
 
-__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* positions, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
+__global__ void updateForceEnergyEdgeKernel(int numVertices, const double* vertices, const double* targetEdgeLengths, const double* edgeLengths, const int* next, const int* prev, const int* shapeId, double* force, double* energy, double stiffness) {
     int m = blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= numVertices) return;
     // get the edge ids
     int prv = prev[m];
     int nxt = next[m];
-    double l0 = targetEdgeLengths[shapeId[m]];
-    double l0prv = targetEdgeLengths[shapeId[prv]];
+    double l0 = targetEdgeLengths[m];
+    double l0prv = targetEdgeLengths[prv];
 
     // use pre-computed edge lengths from updatePolygonGeometryKernel
     double l = edgeLengths[m];
     double prvl = edgeLengths[prv];
 
     double2 dvmzm, dvzpmm;
-    dvmzm.x = positions[2 * m] - positions[2 * nxt];
-    dvmzm.y = positions[2 * m + 1] - positions[2 * nxt + 1];
-    dvzpmm.x = positions[2 * prv] - positions[2 * m];
-    dvzpmm.y = positions[2 * prv + 1] - positions[2 * m + 1];
+    dvmzm.x = vertices[2 * m] - vertices[2 * nxt];
+    dvmzm.y = vertices[2 * m + 1] - vertices[2 * nxt + 1];
+    dvzpmm.x = vertices[2 * prv] - vertices[2 * m];
+    dvzpmm.y = vertices[2 * prv + 1] - vertices[2 * m + 1];
 
     dvmzm.x += 1.5;
     dvmzm.y += 1.5;
@@ -1117,7 +1124,7 @@ __global__ void updateForceEnergyEdgeKernel(int numVertices, const double* posit
     }
 }
 
-__global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId, const int* next, const int* prev, const double* positions, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
+__global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId, const int* next, const int* prev, const double* vertices, const double* areas, const double* targetAreas, const int* startIndices, double* force, double* energy, double compressibility) {
     int m = blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= numVertices) return;
     int s = shapeId[m];
@@ -1125,8 +1132,8 @@ __global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId,
     double A0 = targetAreas[s];
     if (A0 < 1e-14) return;
     double coeff = 0.5 * compressibility * (A - A0);
-    double fx = -coeff * wrap(positions[2 * next[m] + 1] - positions[2 * prev[m] + 1]);
-    double fy = -coeff * wrap(positions[2 * prev[m]] - positions[2 * next[m]]);
+    double fx = -coeff * wrap(vertices[2 * next[m] + 1] - vertices[2 * prev[m] + 1]);
+    double fy = -coeff * wrap(vertices[2 * prev[m]] - vertices[2 * next[m]]);
     atomicAdd(&force[2 * m], fx);
     atomicAdd(&force[2 * m + 1], fy);
     if (startIndices[s] == m) {
@@ -1134,25 +1141,25 @@ __global__ void updateForceEnergyAreaKernel(int numVertices, const int* shapeId,
     }
 }
 
-__global__ void translateVertexKernel(int numVertices, double* positions, double* delta) {
+__global__ void translateVertexKernel(int numVertices, double* vertices, double* delta) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
-    double p = positions[idx] + delta[idx];
-    positions[idx] = p - floor(p);
+    double p = vertices[idx] + delta[idx];
+    vertices[idx] = p - floor(p);
 }
 
-__global__ void updatePositionsKernel(int numVertices, double* positions, const double* force, double dt) {
+__global__ void updateVerticesKernel(int numVertices, double* vertices, const double* force, double dt) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
-    double p = positions[idx] + force[idx] * dt;
-    positions[idx] = p - floor(p);
+    double p = vertices[idx] + force[idx] * dt;
+    vertices[idx] = p - floor(p);
 }
 
-__global__ void resetAreasKernel(const int numVertices, const int* shapeId, double* positions, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
+__global__ void resetAreasKernel(const int numVertices, const int* shapeId, double* vertices, const double* areas, const double* targetAreas, const double* comX, const double* comY) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numVertices * 2) return;
     // which polygon, sir?
-    double x = positions[idx];
+    double x = vertices[idx];
     int s = shapeId[idx / 2];
     double currentArea = areas[s];
     double targetArea = targetAreas[s];
@@ -1162,5 +1169,5 @@ __global__ void resetAreasKernel(const int numVertices, const int* shapeId, doub
     double u = (idx % 2) ? wrap(x - comY[s]) : wrap(x - comX[s]);
     u *= rescale;
     double p = (idx % 2) ? u + comY[s] : u + comX[s];
-    positions[idx] = p - floor(p);
+    vertices[idx] = p - floor(p);
 }

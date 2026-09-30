@@ -4,14 +4,14 @@
 #include <cub/device/device_reduce.cuh>
 #include "cuda_check.h"
 
-__global__ void updatePositionAndVelocityFIREKernel(int numVertices, double* positions, double* velocities, const double* force, double dt) {
+__global__ void updatePositionAndVelocityFIREKernel(int numVertices, double* vertices, double* velocities, const double* force, double dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numVertices) return;
     for (int dim = 0; dim < 2; dim++) {
-        double p = positions[i * 2 + dim]
+        double p = vertices[i * 2 + dim]
                  + velocities[i * 2 + dim] * dt
                  + 0.5 * dt * dt * force[i * 2 + dim];
-        positions[i * 2 + dim] = p - floor(p);
+        vertices[i * 2 + dim] = p - floor(p);
         velocities[i * 2 + dim] += 0.5 * force[i * 2 + dim] * dt;
     }
 }
